@@ -63,6 +63,9 @@ jobs:
         run: |
           set -o pipefail
           node deploy/smoke.mjs --base http://127.0.0.1:8080 --token ci-test-key --real | tee /tmp/real.log
+      - name: Capture clippy output for the report
+        if: always() && github.event_name == 'pull_request'
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings > /tmp/clippy.log 2>&1 || true
       - name: Report results on the PR
         if: always() && github.event_name == 'pull_request'
         env:
@@ -71,20 +74,23 @@ jobs:
           REAL_OUTCOME: ${{ steps.real.outcome }}
         run: |
           {
-            echo "### Web deploy · production stack smoke test"
-            echo ""
+            echo '### Web deploy · production stack smoke test'
+            echo ''
             echo "Job result: \`${{ job.status }}\` · real playback step: \`${REAL_OUTCOME}\`"
-            echo ""
-            echo "```"
-            echo "--- smoke checks ---"
-            cat /tmp/smoke.log 2>/dev/null || echo "(no smoke log)"
-            echo ""
-            echo "--- real playback attempt ---"
-            cat /tmp/real.log 2>/dev/null || echo "(no real-playback log)"
-            echo ""
-            echo "--- server log tail ---"
-            tail -n 40 /tmp/server.log 2>/dev/null || echo "(no server log)"
-            echo "```"
+            echo ''
+            echo '```'
+            echo '--- smoke checks ---'
+            cat /tmp/smoke.log 2>/dev/null || echo '(no smoke log)'
+            echo ''
+            echo '--- real playback attempt ---'
+            cat /tmp/real.log 2>/dev/null || echo '(no real-playback log)'
+            echo ''
+            echo '--- clippy (tail) ---'
+            tail -c 6000 /tmp/clippy.log 2>/dev/null || echo '(no clippy log)'
+            echo ''
+            echo '--- server log tail ---'
+            tail -n 40 /tmp/server.log 2>/dev/null || echo '(no server log)'
+            echo '```'
           } > /tmp/comment.md
           gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md
 
@@ -125,19 +131,22 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           {
-            echo "### Web deploy · Docker image smoke test"
-            echo ""
+            echo '### Web deploy · Docker image smoke test'
+            echo ''
             echo "Job result: \`${{ job.status }}\`"
-            echo ""
-            echo "```"
-            echo "--- smoke checks ---"
-            cat /tmp/smoke.log 2>/dev/null || echo "(no smoke log)"
-            echo ""
-            echo "--- docker build tail ---"
-            tail -n 20 /tmp/docker-build.log 2>/dev/null || echo "(no build log)"
-            echo ""
-            echo "--- container logs ---"
-            docker logs --tail 60 moviebox-web 2>&1 || echo "(container not running)"
-            echo "```"
+            echo ''
+            echo '```'
+            echo '--- smoke checks ---'
+            cat /tmp/smoke.log 2>/dev/null || echo '(no smoke log)'
+            echo ''
+            echo '--- docker ps -a ---'
+            docker ps -a 2>&1 | head -5
+            echo ''
+            echo '--- container inspect ---'
+            docker inspect moviebox-web --format '{{json .State}}' 2>&1 | head -5
+            echo ''
+            echo '--- container logs ---'
+            docker logs --tail 80 moviebox-web 2>&1 || echo '(container not running)'
+            echo '```'
           } > /tmp/comment.md
           gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md

@@ -360,6 +360,10 @@ function spawnApi() {
   const args = ['--web-api', config.apiAddr];
   log(`starting Rust API: ${config.apiBin} ${args.join(' ')}`);
   apiProcess = spawn(config.apiBin, args, { stdio: ['ignore', 'inherit', 'inherit'] });
+  apiProcess.on('error', (error) => {
+    log(`failed to start the Rust API: ${error.message}`);
+    shutdown(1);
+  });
   apiProcess.on('exit', (code, signal) => {
     log(`Rust API exited (code=${code}, signal=${signal}); stopping web server`);
     shutdown(1);
