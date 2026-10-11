@@ -34,7 +34,7 @@ COPY src/ src/
 # placeholder above prints nothing) before shipping it to the runtime stage.
 RUN find src -name '*.rs' -exec touch {} + \
     && cargo build --release --locked \
-    && ./target/release/moviebox-tui --version \
+    && ./target/release/moviebox-tui --version | grep -q 'moviebox-tui' \
     && cp target/release/moviebox-tui /moviebox-tui
 
 # ---- Runtime ---------------------------------------------------------------
