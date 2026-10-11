@@ -58,16 +58,72 @@ function apiUrl(path, params = {}) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: { Accept: 'application/json', ...(options.headers || {}) },
-  });
+  const headers = { Accept: 'application/json', ...(options.headers || {}) };
+  const key = getAccessKey();
+  if (key) headers['X-MovieBox-Key'] = key;
+  const response = await fetch(path, { ...options, headers });
   const contentType = response.headers.get('content-type') || '';
   const payload = contentType.includes('application/json')
     ? await response.json()
     : { error: await response.text() };
+  const attempt = options.accessAttempts || 0;
+  if (response.status === 401 && attempt < 3) {
+    setAccessKey('');
+    const unlocked = await promptAccessKey();
+    if (unlocked) return api(path, { ...options, accessAttempts: attempt + 1 });
+  }
   if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
   return payload;
+}
+
+const ACCESS_KEY_STORAGE = 'moviebox_access_key';
+
+function getAccessKey() {
+  try {
+    return localStorage.getItem(ACCESS_KEY_STORAGE) || '';
+  } catch {
+    return '';
+  }
+}
+
+function setAccessKey(key) {
+  try {
+    if (key) localStorage.setItem(ACCESS_KEY_STORAGE, key);
+    else localStorage.removeItem(ACCESS_KEY_STORAGE);
+  } catch {
+    /* Storage can be unavailable in private contexts. */
+  }
+}
+
+function promptAccessKey() {
+  return new Promise((resolve) => {
+    const dialog = $('#access-dialog');
+    const form = $('#access-form');
+    const input = $('#access-input');
+    if (!dialog || !form || !input) return resolve(false);
+    const onSubmit = (event) => {
+      event.preventDefault();
+      const value = input.value.trim();
+      if (!value) return;
+      setAccessKey(value);
+      input.value = '';
+      cleanup();
+      dialog.close();
+      resolve(true);
+    };
+    const onClose = () => {
+      cleanup();
+      resolve(false);
+    };
+    const cleanup = () => {
+      form.removeEventListener('submit', onSubmit);
+      dialog.removeEventListener('close', onClose);
+    };
+    form.addEventListener('submit', onSubmit);
+    dialog.addEventListener('close', onClose);
+    if (!dialog.open) dialog.showModal();
+    input.focus();
+  });
 }
 
 function setEngineStatus(status, label) {
@@ -80,7 +136,7 @@ async function checkEngine() {
   try {
     const health = await api('/api/health');
     if (health.mode === 'demo') setEngineStatus('demo', 'Demo preview');
-    else setEngineStatus('connected', 'Local engine connected');
+    else setEngineStatus('connected', 'Engine connected');
   } catch {
     setEngineStatus('offline', 'Engine offline');
   }
@@ -656,10 +712,11 @@ document.addEventListener('click', (event) => {
   if (close.dataset.close === 'details') detailsDialog.close();
   if (close.dataset.close === 'player') playerDialog.close();
   if (close.dataset.close === 'help') $('#help-dialog').close();
+  if (close.dataset.close === 'access') $('#access-dialog')?.close();
 });
 
-for (const dialog of [detailsDialog, playerDialog, $('#help-dialog')]) {
-  dialog.addEventListener('click', (event) => {
+for (const dialog of [detailsDialog, playerDialog, $('#help-dialog'), $('#access-dialog')]) {
+  dialog?.addEventListener('click', (event) => {
     if (event.target === dialog) dialog.close();
   });
 }

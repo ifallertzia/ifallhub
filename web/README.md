@@ -39,7 +39,7 @@ npm ci
 npm run build
 ```
 
-The static site is written to `web/dist`. When hosting it separately, configure the web server to forward `/api/*` to the local MovieBox-Tui web API. The dev server does this automatically when `MOVIEBOX_API_URL` is set.
+The static site is written to `web/dist`. The production build intentionally contains no API of its own: the Vite demo API is a development-only convenience and is not shipped in `web/dist`. For a fully working deployment, do **not** publish `web/dist` as a static site - use the repository's Docker-based Render Web Service (or any host that runs the same container), which serves `web/dist` and proxies `/api/*` to the headless Rust API on the same origin. See [`docs/web-deployment.md`](../docs/web-deployment.md) for the full guide, including access-key protection and rate limits.
 
 ## API routes
 
@@ -51,4 +51,4 @@ The static site is written to `web/dist`. When hosting it separately, configure 
 - `POST /api/play` with `{ "stream_set_id": "…", "release_index": 0 }`
 - `GET /api/media/{session}/{scheme}/{host}/{path}` for the short-lived, same-origin media proxy
 
-The API binds to loopback by default; do not expose it publicly without adding authentication and a deployment-specific access policy. Use streams only when you have the right to access them and follow the laws and terms that apply to you.
+The API binds to loopback by default. For public deployments, run it behind the production server (`deploy/server.mjs`, included in the Docker image) and set `MOVIEBOX_WEB_API_TOKEN` plus the edge rate limits described in [`docs/web-deployment.md`](../docs/web-deployment.md). Use streams only when you have the right to access them and follow the laws and terms that apply to you.

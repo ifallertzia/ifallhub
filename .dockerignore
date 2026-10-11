@@ -1,0 +1,20 @@
+# Build context exclusions for the MovieBox web image.
+.git
+.github
+.githooks
+.cargo/audit.toml
+target
+book
+docs
+Formula
+bucket
+node_modules
+**/node_modules
+web/dist
+dist
+*.log
+*.pdb
+.vscode
+.idea
+install.sh
+install.ps1

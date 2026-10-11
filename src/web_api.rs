@@ -1,8 +1,19 @@
-//! Local HTTP API used by the MovieBox web client.
+//! HTTP API used by the MovieBox web client.
 //!
 //! The server deliberately binds to loopback by default. It reuses the same
 //! provider clients as the TUI and keeps resolved stream headers server-side;
 //! the browser only receives a short-lived, same-origin playback URL.
+//!
+//! For public deployments the loopback listener is meant to sit behind the
+//! production web server (see `deploy/server.mjs`). Two env vars harden it:
+//!
+//! * `MOVIEBOX_WEB_API_TOKEN` – optional shared access key. When set, every
+//!   `/api/*` route except `/api/health` and `/api/media/*` requires the key
+//!   via `Authorization: Bearer`, `X-MovieBox-Key`, or a `moviebox_key` cookie.
+//!   Media routes are guarded by their unguessable per-session tokens instead.
+//! * `MOVIEBOX_WEB_API_RATE_PER_MIN` – per-client request budget for the JSON
+//!   API (default 120, `0` disables). Health checks and media segments are
+//!   exempt so playback and Render's health probe are never throttled.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -33,6 +44,9 @@ const STREAM_SET_TTL: Duration = Duration::from_secs(20 * 60);
 const PLAYBACK_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const MAX_STREAM_SETS: usize = 96;
 const MAX_PLAYBACK_SESSIONS: usize = 96;
+const DEFAULT_RATE_PER_MIN: u32 = 120;
+const RATE_BUCKET_TTL: Duration = Duration::from_secs(10 * 60);
+const MAX_RATE_BUCKETS: usize = 8192;
 
 type Headers = HashMap<String, String>;
 
@@ -41,6 +55,14 @@ struct WebState {
     media_client: reqwest::Client,
     stream_sets: Mutex<HashMap<String, CachedStreamSet>>,
     playbacks: Mutex<HashMap<String, WebPlayback>>,
+    access_token: Option<String>,
+    rate_per_minute: u32,
+    rate_buckets: Mutex<HashMap<String, TokenBucket>>,
+}
+
+struct TokenBucket {
+    tokens: f64,
+    updated_at: Instant,
 }
 
 #[derive(Clone)]
@@ -87,12 +109,71 @@ impl WebState {
             .pool_max_idle_per_host(16)
             .build()
             .unwrap_or_default();
+        let access_token = std::env::var("MOVIEBOX_WEB_API_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let rate_per_minute = std::env::var("MOVIEBOX_WEB_API_RATE_PER_MIN")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(DEFAULT_RATE_PER_MIN);
         Self {
             service: MovieBoxService::new(),
             media_client,
             stream_sets: Mutex::new(HashMap::new()),
             playbacks: Mutex::new(HashMap::new()),
+            access_token,
+            rate_per_minute,
+            rate_buckets: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn authorize_api_request(&self, request: &HttpRequest) -> Result<(), HttpResponse> {
+        if let Some(expected) = self.access_token.as_deref() {
+            if !request_presents_access_key(request, expected) {
+                return Err(HttpResponse::error(
+                    401,
+                    "A valid access key is required. Send it as an X-MovieBox-Key header, \
+                     an Authorization: Bearer header, or a moviebox_key cookie.",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn enforce_rate_limit(&self, client_key: &str) -> Result<(), HttpResponse> {
+        if self.rate_per_minute == 0 {
+            return Ok(());
+        }
+        let rate = f64::from(self.rate_per_minute);
+        let burst = (rate / 6.0).max(10.0);
+        let mut buckets = self.rate_buckets.lock().await;
+        let now = Instant::now();
+        buckets.retain(|_, bucket| now.duration_since(bucket.updated_at) < RATE_BUCKET_TTL);
+        if buckets.len() >= MAX_RATE_BUCKETS {
+            if let Some(oldest) = buckets
+                .iter()
+                .min_by_key(|(_, bucket)| bucket.updated_at)
+                .map(|(key, _)| key.clone())
+            {
+                buckets.remove(&oldest);
+            }
+        }
+        let bucket = buckets.entry(client_key.to_string()).or_insert(TokenBucket {
+            tokens: burst,
+            updated_at: now,
+        });
+        let elapsed = now.duration_since(bucket.updated_at).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * rate / 60.0).min(burst);
+        bucket.updated_at = now;
+        if bucket.tokens < 1.0 {
+            return Err(HttpResponse::error(
+                429,
+                "Too many requests. Slow down and try again shortly.",
+            ));
+        }
+        bucket.tokens -= 1.0;
+        Ok(())
     }
 }
 
@@ -114,6 +195,7 @@ pub async fn run(addr: &str) -> io::Result<()> {
 }
 
 async fn handle_connection(stream: TcpStream, state: Arc<WebState>) -> io::Result<()> {
+    let peer_addr = stream.peer_addr().ok();
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let request = match tokio::time::timeout(
@@ -147,12 +229,86 @@ async fn handle_connection(stream: TcpStream, state: Arc<WebState>) -> io::Resul
         }
     };
 
+    // Media routes carry their own unguessable per-session capability token,
+    // so they skip the API access key and rate budget (segments are numerous).
     if request.target.starts_with("/api/media/") {
         return proxy_media(&request, &state, &mut write_half).await;
     }
 
+    let (path, _query) = split_target(&request.target);
+    if path != "/api/health" {
+        let client_key = client_identity(&request.headers, peer_addr);
+        if let Err(response) = state.enforce_rate_limit(&client_key).await {
+            return write_response(&mut write_half, response, request.method == "HEAD").await;
+        }
+        if let Err(response) = state.authorize_api_request(&request) {
+            return write_response(&mut write_half, response, request.method == "HEAD").await;
+        }
+    }
+
     let response = route_api(&request, &state).await;
     write_response(&mut write_half, response, request.method == "HEAD").await
+}
+
+/// Identify the caller for rate limiting. The production web server sits in
+/// front of this API and forwards the edge client address in
+/// `X-Forwarded-For`; fall back to the socket peer otherwise.
+fn client_identity(headers: &Headers, peer: Option<std::net::SocketAddr>) -> String {
+    if let Some(forwarded) = headers.get("x-forwarded-for") {
+        if let Some(last) = forwarded
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .last()
+        {
+            if last.len() <= 64 && !last.contains(|c: char| c.is_whitespace()) {
+                return last.to_ascii_lowercase();
+            }
+        }
+    }
+    peer.map(|peer| peer.ip().to_string()).unwrap_or_default()
+}
+
+fn request_presents_access_key(request: &HttpRequest, expected: &str) -> bool {
+    const BEARER_PREFIX: &str = "bearer ";
+    if let Some(auth) = request.headers.get("authorization")
+        && auth.len() > BEARER_PREFIX.len()
+        && auth
+            .get(..BEARER_PREFIX.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(BEARER_PREFIX))
+        && let Some(token) = auth.get(BEARER_PREFIX.len()..)
+        && constant_time_eq(token.trim(), expected)
+    {
+        return true;
+    }
+    if let Some(key) = request.headers.get("x-moviebox-key")
+        && constant_time_eq(key.trim(), expected)
+    {
+        return true;
+    }
+    if let Some(cookie) = request.headers.get("cookie") {
+        for part in cookie.split(';') {
+            if let Some((name, value)) = part.trim().split_once('=')
+                && name.trim() == "moviebox_key"
+                && constant_time_eq(value.trim(), expected)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 async fn read_request(reader: &mut BufReader<OwnedReadHalf>) -> io::Result<Option<HttpRequest>> {
@@ -957,6 +1113,7 @@ fn reason_phrase(status: u16) -> &'static str {
         200 => "OK",
         204 => "No Content",
         400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -1142,6 +1299,18 @@ async fn resolve_source(
 mod tests {
     use super::*;
 
+    async fn read_http_head(socket: &mut tokio::net::TcpStream) -> String {
+        let mut collected = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !collected.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "connection closed before request head completed");
+            collected.extend_from_slice(&chunk[..read]);
+            assert!(collected.len() < 64 * 1024, "request head too large");
+        }
+        String::from_utf8_lossy(&collected).to_string()
+    }
+
     #[test]
     fn media_route_round_trips_signed_dash_urls() {
         let url = Url::parse(
@@ -1170,5 +1339,234 @@ mod tests {
         let result = rewrite_hls_playlist(input, &base, "session", &allowed);
         assert!(result.contains("/api/media/session/https/cdn.example.test/hls/keys/one.key?sig=abc"));
         assert!(result.contains("/api/media/session/https/cdn.example.test/hls/segments/01.ts"));
+    }
+
+    #[test]
+    fn access_key_matches_supported_presentation_channels() {
+        let expected = "s3cret-key";
+        let mut headers = Headers::new();
+        headers.insert("authorization".into(), format!("Bearer {expected}"));
+        let request = HttpRequest {
+            method: "GET".into(),
+            target: "/api/search".into(),
+            headers: headers.clone(),
+            body: Vec::new(),
+        };
+        assert!(request_presents_access_key(&request, expected));
+
+        let mut headers = Headers::new();
+        headers.insert("x-moviebox-key".into(), expected.to_string());
+        let request = HttpRequest {
+            method: "GET".into(),
+            target: "/api/search".into(),
+            headers: headers.clone(),
+            body: Vec::new(),
+        };
+        assert!(request_presents_access_key(&request, expected));
+
+        let mut headers = Headers::new();
+        headers.insert("cookie".into(), format!("theme=dark; moviebox_key={expected}; other=1"));
+        let request = HttpRequest {
+            method: "GET".into(),
+            target: "/api/search".into(),
+            headers,
+            body: Vec::new(),
+        };
+        assert!(request_presents_access_key(&request, expected));
+
+        let request = HttpRequest {
+            method: "GET".into(),
+            target: "/api/search".into(),
+            headers: Headers::new(),
+            body: Vec::new(),
+        };
+        assert!(!request_presents_access_key(&request, expected));
+    }
+
+    #[test]
+    fn client_identity_prefers_forwarded_edge_address() {
+        let mut headers = Headers::new();
+        headers.insert("x-forwarded-for".into(), "203.0.113.9, 198.51.100.7".to_string());
+        assert_eq!(client_identity(&headers, None), "198.51.100.7");
+        assert_eq!(client_identity(&Headers::new(), None), String::new());
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_throttles_requests_over_budget() {
+        let mut state = WebState::new();
+        state.rate_per_minute = 12;
+        let burst = (f64::from(state.rate_per_minute) / 6.0).max(10.0) as usize;
+        for _ in 0..burst {
+            assert!(state.enforce_rate_limit("198.51.100.7").await.is_ok());
+        }
+        let rejected = state.enforce_rate_limit("198.51.100.7").await;
+        assert!(rejected.is_err());
+        assert_eq!(rejected.err().map(|response| response.status), Some(429));
+        // A different client keeps its own budget.
+        assert!(state.enforce_rate_limit("203.0.113.9").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn media_proxy_forwards_range_requests_and_streams_bodies() {
+        // Mock stream origin that only answers ranged requests.
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut socket, _) = upstream.accept().await.unwrap();
+            let request = read_http_head(&mut socket).await;
+            assert!(request.starts_with("GET /video.mp4 HTTP/1.1"), "{request}");
+            let lower = request.to_ascii_lowercase();
+            assert!(lower.contains("range: bytes=100-199"), "{request}");
+            assert!(lower.contains("authorization: bearer upstream-key"), "{request}");
+            let head = "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\n\
+                        Content-Range: bytes 100-199/1000\r\nContent-Length: 100\r\n\r\n";
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(&[7u8; 100]).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
+        let authority = format!("127.0.0.1:{}", upstream_addr.port());
+        let mut allowed_hosts = HashSet::new();
+        allowed_hosts.insert(authority.clone());
+        let state = WebState {
+            service: MovieBoxService::new(),
+            media_client: reqwest::Client::new(),
+            stream_sets: Mutex::new(HashMap::new()),
+            playbacks: Mutex::new(HashMap::from([(
+                "sesstoken".to_string(),
+                WebPlayback {
+                    created_at: Instant::now(),
+                    source: PlaybackSource {
+                        provider: ProviderKind::MovieBox,
+                        url: format!("http://{authority}/video.mp4"),
+                        headers: vec![("Authorization".into(), "Bearer upstream-key".into())],
+                        subtitle: None,
+                        source_label: "mock".to_string(),
+                        max_height: Some(1080),
+                    },
+                    primary_host: authority.clone(),
+                    allowed_hosts,
+                },
+            )])),
+            access_token: None,
+            rate_per_minute: 0,
+            rate_buckets: Mutex::new(HashMap::new()),
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server_side, _) = listener.accept().await.unwrap();
+        let request = HttpRequest {
+            method: "GET".to_string(),
+            target: format!("/api/media/sesstoken/http/{authority}/video.mp4"),
+            headers: HashMap::from([("range".to_string(), "bytes=100-199".to_string())]),
+            body: Vec::new(),
+        };
+        let (_reader, mut writer) = server_side.into_split();
+        let proxy_task = tokio::spawn(async move {
+            proxy_media(&request, &state, &mut writer).await.unwrap();
+        });
+
+        let mut raw = Vec::new();
+        let read_result = client.read_to_end(&mut raw);
+        tokio::time::timeout(Duration::from_secs(10), read_result)
+            .await
+            .unwrap()
+            .unwrap();
+        let raw = String::from_utf8_lossy(&raw);
+        let (head, body) = raw.split_once("\r\n\r\n").expect("raw HTTP response");
+        assert!(head.starts_with("HTTP/1.1 206 Partial Content"), "{head}");
+        assert!(head.to_ascii_lowercase().contains("content-range: bytes 100-199/1000"), "{head}");
+        assert_eq!(body.as_bytes(), &[7u8; 100][..]);
+
+        proxy_task.await.unwrap();
+        upstream_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn media_proxy_rewrites_hls_manifests_to_media_routes() {
+        let manifest = "#EXTM3U\n#EXT-X-VERSION:3\nsegments/01.ts\n";
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let manifest_body = manifest.to_string();
+        let upstream_task = tokio::spawn(async move {
+            let (mut socket, _) = upstream.accept().await.unwrap();
+            let request = read_http_head(&mut socket).await;
+            assert!(
+                request.starts_with("GET /live/master.m3u8"),
+                "unexpected upstream request: {request}"
+            );
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\n\r\n",
+                manifest_body.len()
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(manifest_body.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
+        let authority = format!("127.0.0.1:{}", upstream_addr.port());
+        let mut allowed_hosts = HashSet::new();
+        allowed_hosts.insert(authority.clone());
+        let state = WebState {
+            service: MovieBoxService::new(),
+            media_client: reqwest::Client::new(),
+            stream_sets: Mutex::new(HashMap::new()),
+            playbacks: Mutex::new(HashMap::from([(
+                "hls-token".to_string(),
+                WebPlayback {
+                    created_at: Instant::now(),
+                    source: PlaybackSource {
+                        provider: ProviderKind::MovieBox,
+                        url: format!("http://{authority}/live/master.m3u8"),
+                        headers: Vec::new(),
+                        subtitle: None,
+                        source_label: "mock".to_string(),
+                        max_height: None,
+                    },
+                    primary_host: authority.clone(),
+                    allowed_hosts,
+                },
+            )])),
+            access_token: None,
+            rate_per_minute: 0,
+            rate_buckets: Mutex::new(HashMap::new()),
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server_side, _) = listener.accept().await.unwrap();
+        let request = HttpRequest {
+            method: "GET".to_string(),
+            target: format!("/api/media/hls-token/http/{authority}/live/master.m3u8"),
+            headers: Headers::new(),
+            body: Vec::new(),
+        };
+        let (_reader, mut writer) = server_side.into_split();
+        let proxy_task = tokio::spawn(async move {
+            proxy_media(&request, &state, &mut writer).await.unwrap();
+        });
+
+        let mut raw = Vec::new();
+        let read_result = client.read_to_end(&mut raw);
+        tokio::time::timeout(Duration::from_secs(10), read_result)
+            .await
+            .unwrap()
+            .unwrap();
+        let raw = String::from_utf8_lossy(&raw);
+        let (head, body) = raw.split_once("\r\n\r\n").expect("raw HTTP response");
+        assert!(head.contains("200 OK"), "{head}");
+        assert!(head.contains("application/vnd.apple.mpegurl"), "{head}");
+        let segment_route = format!("/api/media/hls-token/http/{authority}/live/segments/01.ts");
+        assert!(body.contains(&segment_route), "{body}");
+
+        proxy_task.await.unwrap();
+        upstream_task.await.unwrap();
     }
 }

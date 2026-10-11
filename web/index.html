@@ -221,6 +221,20 @@
       </div>
     </dialog>
 
+    <dialog class="help-dialog access-dialog" id="access-dialog" aria-label="Access key required">
+      <div class="help-panel">
+        <button class="dialog-close" type="button" data-close="access" aria-label="Close">×</button>
+        <div class="section-kicker">PRIVATE DEPLOYMENT</div>
+        <h2>Enter your access key</h2>
+        <p>This MovieBox deployment is protected. Paste the access key configured by its operator to unlock search and playback.</p>
+        <form id="access-form" class="access-form">
+          <input type="password" id="access-input" class="access-input" placeholder="Access key" autocomplete="current-password" required />
+          <button type="submit" class="access-submit"><span>Unlock</span></button>
+        </form>
+        <div class="help-callout"><span>i</span><p>The key stays in this browser and is only sent with same-origin API requests.</p></div>
+      </div>
+    </dialog>
+
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

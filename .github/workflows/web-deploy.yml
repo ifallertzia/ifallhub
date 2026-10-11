@@ -1,0 +1,94 @@
+name: Web deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Production stack smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: web-deploy
+      - name: Build Rust API
+        run: cargo build --locked
+      - name: Boot production stack
+        run: |
+          PORT=8080 \
+            MOVIEBOX_API_BIN="$PWD/target/debug/moviebox-tui" \
+            MOVIEBOX_WEB_API_TOKEN=ci-test-key \
+            node deploy/server.mjs > /tmp/server.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8080/api/health > /dev/null; then
+              echo "stack is healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "stack never became healthy"
+          cat /tmp/server.log
+          exit 1
+      - name: Run smoke checks
+        run: node deploy/smoke.mjs --base http://127.0.0.1:8080 --token ci-test-key
+      - name: Attempt real playback end to end (best effort)
+        continue-on-error: true
+        run: node deploy/smoke.mjs --base http://127.0.0.1:8080 --token ci-test-key --real
+      - name: Show server logs on failure
+        if: failure()
+        run: cat /tmp/server.log
+
+  image:
+    name: Docker image smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Build production image
+        run: docker build -t moviebox-web .
+      - name: Run production container
+        run: |
+          docker run -d --name moviebox-web -p 8080:8080 \
+            -e PORT=8080 -e MOVIEBOX_WEB_API_TOKEN=docker-test-key moviebox-web
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8080/api/health > /dev/null; then
+              echo "container is healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "container never became healthy"
+          docker logs moviebox-web
+          exit 1
+      - name: Run container smoke checks
+        run: node deploy/smoke.mjs --base http://127.0.0.1:8080 --token docker-test-key
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs moviebox-web
