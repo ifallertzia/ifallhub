@@ -39,7 +39,6 @@ WORKDIR /app
 ENV NODE_ENV=production \
     MOVIEBOX_API_BIN=/app/moviebox-tui \
     MOVIEBOX_API_ADDR=127.0.0.1:8787 \
-    MOVIEBOX_API_TARGET=http://127.0.0.1:8787 \
     MOVIEBOX_WEB_ROOT=/app/web/dist
 COPY deploy/server.mjs deploy/smoke.mjs ./deploy/
 COPY --from=web-build /build/web/dist ./web/dist

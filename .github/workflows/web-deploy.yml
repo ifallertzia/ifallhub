@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -51,16 +52,41 @@ jobs:
             sleep 1
           done
           echo "stack never became healthy"
-          cat /tmp/server.log
           exit 1
       - name: Run smoke checks
-        run: node deploy/smoke.mjs --base http://127.0.0.1:8080 --token ci-test-key
+        run: |
+          set -o pipefail
+          node deploy/smoke.mjs --base http://127.0.0.1:8080 --token ci-test-key | tee /tmp/smoke.log
       - name: Attempt real playback end to end (best effort)
+        id: real
         continue-on-error: true
-        run: node deploy/smoke.mjs --base http://127.0.0.1:8080 --token ci-test-key --real
-      - name: Show server logs on failure
-        if: failure()
-        run: cat /tmp/server.log
+        run: |
+          set -o pipefail
+          node deploy/smoke.mjs --base http://127.0.0.1:8080 --token ci-test-key --real | tee /tmp/real.log
+      - name: Report results on the PR
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REAL_OUTCOME: ${{ steps.real.outcome }}
+        run: |
+          {
+            echo "### Web deploy · production stack smoke test"
+            echo ""
+            echo "Job result: \`${{ job.status }}\` · real playback step: \`${REAL_OUTCOME}\`"
+            echo ""
+            echo "```"
+            echo "--- smoke checks ---"
+            cat /tmp/smoke.log 2>/dev/null || echo "(no smoke log)"
+            echo ""
+            echo "--- real playback attempt ---"
+            cat /tmp/real.log 2>/dev/null || echo "(no real-playback log)"
+            echo ""
+            echo "--- server log tail ---"
+            tail -n 40 /tmp/server.log 2>/dev/null || echo "(no server log)"
+            echo "```"
+          } > /tmp/comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md
 
   image:
     name: Docker image smoke test
@@ -72,7 +98,9 @@ jobs:
         with:
           node-version: 22
       - name: Build production image
-        run: docker build -t moviebox-web .
+        run: |
+          set -o pipefail
+          docker build -t moviebox-web . | tee /tmp/docker-build.log
       - name: Run production container
         run: |
           docker run -d --name moviebox-web -p 8080:8080 \
@@ -85,10 +113,31 @@ jobs:
             sleep 1
           done
           echo "container never became healthy"
-          docker logs moviebox-web
           exit 1
       - name: Run container smoke checks
-        run: node deploy/smoke.mjs --base http://127.0.0.1:8080 --token docker-test-key
-      - name: Show container logs on failure
-        if: failure()
-        run: docker logs moviebox-web
+        run: |
+          set -o pipefail
+          node deploy/smoke.mjs --base http://127.0.0.1:8080 --token docker-test-key | tee /tmp/smoke.log
+      - name: Report results on the PR
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo "### Web deploy · Docker image smoke test"
+            echo ""
+            echo "Job result: \`${{ job.status }}\`"
+            echo ""
+            echo "```"
+            echo "--- smoke checks ---"
+            cat /tmp/smoke.log 2>/dev/null || echo "(no smoke log)"
+            echo ""
+            echo "--- docker build tail ---"
+            tail -n 20 /tmp/docker-build.log 2>/dev/null || echo "(no build log)"
+            echo ""
+            echo "--- container logs ---"
+            docker logs --tail 60 moviebox-web 2>&1 || echo "(container not running)"
+            echo "```"
+          } > /tmp/comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md

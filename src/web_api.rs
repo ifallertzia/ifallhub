@@ -29,10 +29,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use url::Url;
 
+use crate::providers::ReleaseProvider;
 use crate::providers::models::{
     PlaybackSource, ProviderError, ProviderKind, Release, ResolutionIntent, SourceMirror,
 };
-use crate::providers::ReleaseProvider;
 use crate::service::MovieBoxService;
 
 const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
@@ -159,10 +159,12 @@ impl WebState {
                 buckets.remove(&oldest);
             }
         }
-        let bucket = buckets.entry(client_key.to_string()).or_insert(TokenBucket {
-            tokens: burst,
-            updated_at: now,
-        });
+        let bucket = buckets
+            .entry(client_key.to_string())
+            .or_insert(TokenBucket {
+                tokens: burst,
+                updated_at: now,
+            });
         let elapsed = now.duration_since(bucket.updated_at).as_secs_f64();
         bucket.tokens = (bucket.tokens + elapsed * rate / 60.0).min(burst);
         bucket.updated_at = now;
@@ -198,36 +200,32 @@ async fn handle_connection(stream: TcpStream, state: Arc<WebState>) -> io::Resul
     let peer_addr = stream.peer_addr().ok();
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
-    let request = match tokio::time::timeout(
-        Duration::from_secs(10),
-        read_request(&mut reader),
-    )
-    .await
-    {
-        Ok(Ok(Some(request))) => request,
-        Ok(Ok(None)) => return Ok(()),
-        Ok(Err(error)) => {
-            let status = if error.to_string().contains("too large") {
-                413
-            } else {
-                400
-            };
-            return write_response(
-                &mut write_half,
-                HttpResponse::json(status, json!({ "error": error.to_string() })),
-                false,
-            )
-            .await;
-        }
-        Err(_) => {
-            return write_response(
-                &mut write_half,
-                HttpResponse::json(408, json!({ "error": "Request timed out" })),
-                false,
-            )
-            .await;
-        }
-    };
+    let request =
+        match tokio::time::timeout(Duration::from_secs(10), read_request(&mut reader)).await {
+            Ok(Ok(Some(request))) => request,
+            Ok(Ok(None)) => return Ok(()),
+            Ok(Err(error)) => {
+                let status = if error.to_string().contains("too large") {
+                    413
+                } else {
+                    400
+                };
+                return write_response(
+                    &mut write_half,
+                    HttpResponse::json(status, json!({ "error": error.to_string() })),
+                    false,
+                )
+                .await;
+            }
+            Err(_) => {
+                return write_response(
+                    &mut write_half,
+                    HttpResponse::json(408, json!({ "error": "Request timed out" })),
+                    false,
+                )
+                .await;
+            }
+        };
 
     // Media routes carry their own unguessable per-session capability token,
     // so they skip the API access key and rate budget (segments are numerous).
@@ -426,17 +424,15 @@ async fn route_api(request: &HttpRequest, state: &WebState) -> HttpResponse {
 
     let (path, query) = split_target(&request.target);
     match path {
-        "/api/health" if request.method == "GET" || request.method == "HEAD" => {
-            HttpResponse::json(
-                200,
-                json!({
-                    "status": "ok",
-                    "mode": "live",
-                    "engine": "MovieBox-Tui",
-                    "version": env!("CARGO_PKG_VERSION"),
-                }),
-            )
-        }
+        "/api/health" if request.method == "GET" || request.method == "HEAD" => HttpResponse::json(
+            200,
+            json!({
+                "status": "ok",
+                "mode": "live",
+                "engine": "MovieBox-Tui",
+                "version": env!("CARGO_PKG_VERSION"),
+            }),
+        ),
         "/api/providers" if request.method == "GET" || request.method == "HEAD" => {
             let providers = [
                 ProviderKind::MovieBox,
@@ -484,10 +480,9 @@ async fn discover(query: &str, state: &WebState) -> HttpResponse {
     }
     let page = parse_page(params.get("page"));
     match state.service.homepage("2", page).await {
-        Ok((items, metrics)) => HttpResponse::json(
-            200,
-            json!({ "items": items, "metrics": metrics }),
-        ),
+        Ok((items, metrics)) => {
+            HttpResponse::json(200, json!({ "items": items, "metrics": metrics }))
+        }
         Err(error) => HttpResponse::error(502, error),
     }
 }
@@ -527,7 +522,11 @@ async fn details(query: &str, state: &WebState) -> HttpResponse {
         Ok(provider) => provider,
         Err(message) => return HttpResponse::error(400, message),
     };
-    let id = params.get("id").map(String::as_str).unwrap_or_default().trim();
+    let id = params
+        .get("id")
+        .map(String::as_str)
+        .unwrap_or_default()
+        .trim();
     if id.is_empty() || id.len() > 512 {
         return HttpResponse::error(400, "A valid title id is required");
     }
@@ -543,7 +542,11 @@ async fn streams(query: &str, state: &WebState) -> HttpResponse {
         Ok(provider) => provider,
         Err(message) => return HttpResponse::error(400, message),
     };
-    let id = params.get("id").map(String::as_str).unwrap_or_default().trim();
+    let id = params
+        .get("id")
+        .map(String::as_str)
+        .unwrap_or_default()
+        .trim();
     if id.is_empty() || id.len() > 512 {
         return HttpResponse::error(400, "A valid title id is required");
     }
@@ -558,10 +561,11 @@ async fn streams(query: &str, state: &WebState) -> HttpResponse {
         || id.starts_with("tv:")
         || id.starts_with("anime:");
 
-    let releases = match fetch_releases(&state.service, provider, id, season, episode, is_series).await {
-        Ok(releases) => releases,
-        Err(message) => return HttpResponse::error(502, message),
-    };
+    let releases =
+        match fetch_releases(&state.service, provider, id, season, episode, is_series).await {
+            Ok(releases) => releases,
+            Err(message) => return HttpResponse::error(502, message),
+        };
     if releases.is_empty() {
         return HttpResponse::error(404, "No playable streams found for this title");
     }
@@ -624,7 +628,9 @@ async fn fetch_releases(
             ReleaseProvider::episode_streams(&service.client, subject_id, season, episode).await
         }
         ProviderKind::FourKHdHub => match service.fourk_client.as_ref() {
-            Some(client) => ReleaseProvider::episode_streams(client, subject_id, season, episode).await,
+            Some(client) => {
+                ReleaseProvider::episode_streams(client, subject_id, season, episode).await
+            }
             None => Err(ProviderError::Unavailable(
                 "4KHDHub is unavailable".to_string(),
             )),
@@ -675,7 +681,12 @@ async fn play(request: &HttpRequest, state: &WebState) -> HttpResponse {
         sets.retain(|_, value| value.created_at.elapsed() < STREAM_SET_TTL);
         match sets.get(&request.stream_set_id) {
             Some(value) => value.clone(),
-            None => return HttpResponse::error(410, "Stream list expired. Refresh the stream list and try again."),
+            None => {
+                return HttpResponse::error(
+                    410,
+                    "Stream list expired. Refresh the stream list and try again.",
+                );
+            }
         }
     };
     let release = match stream_set.releases.get(request.release_index) {
@@ -683,16 +694,20 @@ async fn play(request: &HttpRequest, state: &WebState) -> HttpResponse {
         None => return HttpResponse::error(400, "Selected stream does not exist"),
     };
 
-    let source = match resolve_source(&state.service, &stream_set, &release, request.mirror_index).await {
-        Ok(source) => source,
-        Err(message) => return HttpResponse::error(502, message),
-    };
+    let source =
+        match resolve_source(&state.service, &stream_set, &release, request.mirror_index).await {
+            Ok(source) => source,
+            Err(message) => return HttpResponse::error(502, message),
+        };
     let source_url = match Url::parse(&source.url) {
         Ok(url)
             if matches!(url.scheme(), "http" | "https")
                 && url.host_str().is_some()
                 && url.username().is_empty()
-                && url.password().is_none() => url,
+                && url.password().is_none() =>
+        {
+            url
+        }
         _ => return HttpResponse::error(502, "The stream resolver returned an invalid URL"),
     };
     let primary_host = authority(&source_url);
@@ -759,7 +774,12 @@ async fn proxy_media(
         };
         let requested_host = authority(&target_url);
         if !playback.allowed_hosts.contains(&requested_host) {
-            return write_proxy_error(writer, 403, "Media host is not part of this playback session").await;
+            return write_proxy_error(
+                writer,
+                403,
+                "Media host is not part of this playback session",
+            )
+            .await;
         }
         (
             playback.source.clone(),
@@ -997,7 +1017,10 @@ fn rewrite_hls_uri_attributes(
             continue;
         }
         let value_start = key_end + 1;
-        let Some(end_relative) = line.get(value_start..).and_then(|tail| tail.find(quote as char)) else {
+        let Some(end_relative) = line
+            .get(value_start..)
+            .and_then(|tail| tail.find(quote as char))
+        else {
             break;
         };
         let value_end = value_start + end_relative;
@@ -1020,8 +1043,7 @@ fn route_manifest_reference(
     allowed_hosts: &HashSet<String>,
 ) -> Option<String> {
     let target = base_url.join(reference).ok()?;
-    if !matches!(target.scheme(), "http" | "https")
-        || !allowed_hosts.contains(&authority(&target))
+    if !matches!(target.scheme(), "http" | "https") || !allowed_hosts.contains(&authority(&target))
     {
         return None;
     }
@@ -1288,7 +1310,11 @@ async fn resolve_source(
 
     // This metadata is retained in the short-lived stream set for a later
     // subtitle picker without delaying the initial web playback request.
-    let _ = (&stream_set.subject_id, stream_set.season, stream_set.episode);
+    let _ = (
+        &stream_set.subject_id,
+        stream_set.season,
+        stream_set.episode,
+    );
     if source.max_height == Some(0) {
         source.max_height = None;
     }
@@ -1335,9 +1361,12 @@ mod tests {
         let base = Url::parse("https://cdn.example.test/hls/master.m3u8").unwrap();
         let mut allowed = HashSet::new();
         allowed.insert("cdn.example.test".to_string());
-        let input = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"keys/one.key?sig=abc\"\nsegments/01.ts\n";
+        let input =
+            "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"keys/one.key?sig=abc\"\nsegments/01.ts\n";
         let result = rewrite_hls_playlist(input, &base, "session", &allowed);
-        assert!(result.contains("/api/media/session/https/cdn.example.test/hls/keys/one.key?sig=abc"));
+        assert!(
+            result.contains("/api/media/session/https/cdn.example.test/hls/keys/one.key?sig=abc")
+        );
         assert!(result.contains("/api/media/session/https/cdn.example.test/hls/segments/01.ts"));
     }
 
@@ -1365,7 +1394,10 @@ mod tests {
         assert!(request_presents_access_key(&request, expected));
 
         let mut headers = Headers::new();
-        headers.insert("cookie".into(), format!("theme=dark; moviebox_key={expected}; other=1"));
+        headers.insert(
+            "cookie".into(),
+            format!("theme=dark; moviebox_key={expected}; other=1"),
+        );
         let request = HttpRequest {
             method: "GET".into(),
             target: "/api/search".into(),
@@ -1386,7 +1418,10 @@ mod tests {
     #[test]
     fn client_identity_prefers_forwarded_edge_address() {
         let mut headers = Headers::new();
-        headers.insert("x-forwarded-for".into(), "203.0.113.9, 198.51.100.7".to_string());
+        headers.insert(
+            "x-forwarded-for".into(),
+            "203.0.113.9, 198.51.100.7".to_string(),
+        );
         assert_eq!(client_identity(&headers, None), "198.51.100.7");
         assert_eq!(client_identity(&Headers::new(), None), String::new());
     }
@@ -1417,7 +1452,10 @@ mod tests {
             assert!(request.starts_with("GET /video.mp4 HTTP/1.1"), "{request}");
             let lower = request.to_ascii_lowercase();
             assert!(lower.contains("range: bytes=100-199"), "{request}");
-            assert!(lower.contains("authorization: bearer upstream-key"), "{request}");
+            assert!(
+                lower.contains("authorization: bearer upstream-key"),
+                "{request}"
+            );
             let head = "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\n\
                         Content-Range: bytes 100-199/1000\r\nContent-Length: 100\r\n\r\n";
             socket.write_all(head.as_bytes()).await.unwrap();
@@ -1479,7 +1517,11 @@ mod tests {
         let raw = String::from_utf8_lossy(&raw);
         let (head, body) = raw.split_once("\r\n\r\n").expect("raw HTTP response");
         assert!(head.starts_with("HTTP/1.1 206 Partial Content"), "{head}");
-        assert!(head.to_ascii_lowercase().contains("content-range: bytes 100-199/1000"), "{head}");
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("content-range: bytes 100-199/1000"),
+            "{head}"
+        );
         assert_eq!(body.as_bytes(), &[7u8; 100][..]);
 
         proxy_task.await.unwrap();
