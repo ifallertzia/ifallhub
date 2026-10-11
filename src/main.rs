@@ -83,6 +83,17 @@ async fn main() -> std::io::Result<()> {
         moviebox_tui::proxy::run_sidecar(target_url, headers, sub_url, max_height).await;
         return Ok(());
     }
+    if let Some(pos) = args.iter().position(|arg| arg == "--web-api") {
+        let addr = args
+            .get(pos + 1)
+            .filter(|value| !value.starts_with('-'))
+            .cloned()
+            .or_else(|| std::env::var("MOVIEBOX_WEB_API_ADDR").ok())
+            .unwrap_or_else(|| "127.0.0.1:8787".to_string());
+        moviebox_tui::logging::init();
+        moviebox_tui::web_api::run(&addr).await?;
+        return Ok(());
+    }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!("moviebox-tui {}", env!("CARGO_PKG_VERSION"));
         println!("A terminal client for finding and streaming movies, TV shows, and anime.\n");
@@ -90,6 +101,7 @@ async fn main() -> std::io::Result<()> {
         println!("    moviebox-tui [OPTIONS]\n");
         println!("OPTIONS:");
         println!("    -h, --help           Print help information");
+        println!("    --web-api [ADDR]     Start the local web API (default 127.0.0.1:8787)");
         println!("    -v, -V, --version    Print version information\n");
         println!("ENVIRONMENT VARIABLES:");
         println!("    MOVIEBOX_LOG            Log level (off, error, warn, info, debug, trace)");

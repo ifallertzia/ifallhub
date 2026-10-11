@@ -12,3 +12,4 @@ pub mod proxy;
 pub mod service;
 pub mod tui;
 pub mod updater;
+pub mod web_api;

@@ -1,0 +1,17 @@
+{
+  "name": "moviebox-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "shaka-player": "^5.2.13"
+  },
+  "devDependencies": {
+    "vite": "^8.3.4"
+  }
+}

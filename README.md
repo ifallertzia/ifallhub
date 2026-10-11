@@ -121,6 +121,19 @@ moviebox-tui
 - Type to search, press `Enter` to play.
 - Press `?` for shortcuts, or type `/settings` for preferences.
 
+## Web Player (Experimental)
+
+A basic browser interface is available in [`web/`](web/). It reuses MovieBox-Tui's provider clients, search, details, stream resolution, and playback headers through a loopback-only Rust API. Start the API and UI in separate terminals:
+
+```bash
+cargo run -- --web-api
+cd web
+npm ci
+MOVIEBOX_API_URL=http://127.0.0.1:8787 npm run dev
+```
+
+Running `npm run dev` without the API URL shows a labelled demo preview instead of making provider requests. See [`web/README.md`](web/README.md) for Windows instructions, build steps, and API details.
+
 ## Documentation
 
 Full documentation at [**mesamirh.github.io/MovieBox-Tui**](https://mesamirh.github.io/MovieBox-Tui/) or [`docs/`](docs/):

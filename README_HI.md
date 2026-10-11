@@ -126,6 +126,19 @@ moviebox-tui
 - सर्च करने के लिए कोई भी टाइटल टाइप करें, प्ले करने के लिए `Enter` दबाएं।
 - शॉर्टकट्स के लिए TUI में `?` दबाएं, सेटिंग्स के लिए `/settings` टाइप करें।
 
+## वेब प्लेयर (प्रयोगात्मक)
+
+[`web/`](web/) में एक बेसिक ब्राउज़र UI भी है। यह MovieBox-Tui के मौजूदा provider, search और stream resolver का उपयोग local Rust API के जरिए करता है। दो टर्मिनल खोलकर चलाएं:
+
+```bash
+cargo run -- --web-api
+cd web
+npm ci
+MOVIEBOX_API_URL=http://127.0.0.1:8787 npm run dev
+```
+
+केवल `npm run dev` चलाने पर provider requests के बजाय labelled demo preview खुलता है। अधिक जानकारी [`web/README.md`](web/README.md) में है।
+
 ## डॉक्यूमेंटेशन
 
 विस्तृत गाइड और आर्किटेक्चर संदर्भ [**mesamirh.github.io/MovieBox-Tui**](https://mesamirh.github.io/MovieBox-Tui/) पर या [`docs/`](docs/) डायरेक्टरी में उपलब्ध हैं:
