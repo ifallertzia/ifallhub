@@ -66,7 +66,9 @@ jobs:
           node deploy/smoke.mjs --base http://127.0.0.1:8080 --token ci-test-key --real | tee /tmp/real.log
       - name: Capture clippy output for the report
         if: always() && github.event_name == 'pull_request'
-        run: cargo clippy --all-targets --all-features --locked -- -D warnings > /tmp/clippy.log 2>&1 || true
+        run: |
+          cargo clippy --message-format=short --all-targets --all-features --locked -- -D warnings 2>&1 \
+            | sed 's/\x1b\[[0-9;]*m//g' > /tmp/clippy.log || true
       - name: Report results on the PR
         if: always() && github.event_name == 'pull_request'
         env:
@@ -87,7 +89,7 @@ jobs:
             cat /tmp/real.log 2>/dev/null || echo '(no real-playback log)'
             echo ''
             echo '--- clippy (tail) ---'
-            tail -c 6000 /tmp/clippy.log 2>/dev/null || echo '(no clippy log)'
+            tail -c 12000 /tmp/clippy.log 2>/dev/null || echo '(no clippy log)'
             echo ''
             echo '--- server log tail ---'
             tail -n 40 /tmp/server.log 2>/dev/null || echo '(no server log)'

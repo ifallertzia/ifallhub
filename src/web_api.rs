@@ -257,7 +257,7 @@ fn client_identity(headers: &Headers, peer: Option<std::net::SocketAddr>) -> Str
             .split(',')
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .last()
+            .next_back()
         {
             if last.len() <= 64 && !last.contains(|c: char| c.is_whitespace()) {
                 return last.to_ascii_lowercase();
