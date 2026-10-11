@@ -977,7 +977,7 @@ fn extract_target_url(path_and_query: &str) -> Option<String> {
     }
 }
 
-fn filter_dash_representations(manifest: &str, max_height: u64) -> String {
+pub(crate) fn filter_dash_representations(manifest: &str, max_height: u64) -> String {
     let mut reps = Vec::new();
     let mut cursor = 0;
     while let Some(start_rel) = manifest[cursor..].find("<Representation") {
