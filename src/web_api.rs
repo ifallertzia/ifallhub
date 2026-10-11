@@ -1606,7 +1606,7 @@ mod tests {
         assert!(head.contains("200 OK"), "{head}");
         assert!(head.contains("application/vnd.apple.mpegurl"), "{head}");
         let segment_route = format!("/api/media/hls-token/http/{authority}/live/segments/01.ts");
-        assert!(body.contains(&segment_route), "{body}");
+        assert!(body.contains(segment_route.as_str()), "{body}");
 
         proxy_task.await.unwrap();
         upstream_task.await.unwrap();

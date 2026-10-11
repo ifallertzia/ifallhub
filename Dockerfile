@@ -29,7 +29,12 @@ RUN mkdir -p src \
     && cargo build --release --locked \
     && rm -rf src target/release/moviebox-tui
 COPY src/ src/
-RUN cargo build --release --locked \
+# Docker COPY preserves old mtimes, so bump them to force a rebuild over the
+# cached dependency graph; then verify the binary is the real CLI (the
+# placeholder above prints nothing) before shipping it to the runtime stage.
+RUN find src -name '*.rs' -exec touch {} + \
+    && cargo build --release --locked \
+    && ./target/release/moviebox-tui --version \
     && cp target/release/moviebox-tui /moviebox-tui
 
 # ---- Runtime ---------------------------------------------------------------
