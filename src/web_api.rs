@@ -715,6 +715,7 @@ async fn homepage_pool(state: &WebState, pages: usize) -> Result<Vec<CatalogRow>
     Ok(pool)
 }
 
+#[derive(Debug)]
 struct RelatedSeed {
     term: String,
     reason: String,
@@ -2295,6 +2296,10 @@ mod tests {
             access_token: None,
             rate_per_minute: 0,
             rate_buckets: Mutex::new(HashMap::new()),
+            // In-memory only: these tests never touch the data directory.
+            library: LibraryStore::load(None),
+            homepage_pages: Mutex::new(HashMap::new()),
+            title_meta: Mutex::new(HashMap::new()),
         };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2382,6 +2387,10 @@ mod tests {
             access_token: None,
             rate_per_minute: 0,
             rate_buckets: Mutex::new(HashMap::new()),
+            // In-memory only: these tests never touch the data directory.
+            library: LibraryStore::load(None),
+            homepage_pages: Mutex::new(HashMap::new()),
+            title_meta: Mutex::new(HashMap::new()),
         };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

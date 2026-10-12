@@ -383,6 +383,10 @@ pub fn watchlist_entry(
 }
 
 /// Normalises a client-supplied progress update.
+///
+/// One argument per stored column; grouping them into a struct would only move
+/// the same eleven fields to the call site in `web_api`.
+#[allow(clippy::too_many_arguments)]
 pub fn progress_entry(
     provider: &str,
     id: &str,

@@ -1,0 +1,78 @@
+name: Arena verify (temporary)
+
+# Temporary helper used while authoring this branch in a sandbox without a Rust
+# toolchain: it reports rustfmt diffs and failing test names back on the PR.
+# Remove before merging.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: arena-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  report:
+    name: Rust fmt + targeted tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: arena-verify
+
+      - name: rustfmt diff for the changed Rust files
+        run: |
+          set -o pipefail
+          rustfmt --check --edition 2024 \
+            src/library.rs src/web_api.rs src/config.rs src/lib.rs 2>&1 \
+            | sed 's/\x1b\[[0-9;]*m//g' > /tmp/fmt.log || true
+          echo "fmt diff bytes: $(wc -c < /tmp/fmt.log)"
+
+      - name: Targeted tests (library + web_api)
+        run: |
+          set -o pipefail
+          cargo install cargo-nextest --locked 2>/dev/null || true
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo nextest run --all-features --locked library:: web_api:: 2>&1 \
+            | sed 's/\x1b\[[0-9;]*m//g' | tail -n 60 > /tmp/tests.log || true
+          cat /tmp/tests.log
+
+      - name: Clippy for the changed files
+        run: |
+          set -o pipefail
+          cargo clippy --message-format=short --all-targets --all-features --locked -- -D warnings 2>&1 \
+            | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^(src|error|warning)' | tail -n 60 > /tmp/clippy.log || true
+          cat /tmp/clippy.log
+
+      - name: Report on the PR
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo '### Arena verify · rustfmt + targeted tests'
+            echo ''
+            echo '```'
+            echo '--- rustfmt --check (changed files) ---'
+            head -c 9000 /tmp/fmt.log 2>/dev/null || echo '(clean)'
+            echo ''
+            echo '--- cargo nextest (library:: web_api::) ---'
+            cat /tmp/tests.log 2>/dev/null || echo '(no output)'
+            echo ''
+            echo '--- clippy ---'
+            cat /tmp/clippy.log 2>/dev/null || echo '(clean)'
+            echo '```'
+          } > /tmp/comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md
