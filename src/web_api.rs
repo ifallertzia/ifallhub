@@ -574,10 +574,11 @@ async fn streams(query: &str, state: &WebState) -> HttpResponse {
     }
     // Sort releases to bring best playable links to top (fixes video-only/audio-only by prioritizing reliable providers)
     releases.sort_by(|a, b| {
+        // Web playback order: Sakshi (Dramachi) first, then Ritu (4KHDHub), then Siddharth (MovieBox).
         let provider_priority = |p: ProviderKind| match p {
-            ProviderKind::MovieBox => 0,
+            ProviderKind::Dramachi => 0,
             ProviderKind::FourKHdHub => 1,
-            ProviderKind::Dramachi => 2,
+            ProviderKind::MovieBox => 2,
             ProviderKind::Addons => 3,
             ProviderKind::BdixCircleFtp => 4,
             ProviderKind::BdixDhakaFlix => 5,
