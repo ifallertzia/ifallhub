@@ -364,51 +364,51 @@ async fn handle_connection(
         // Relaxed host check: allow primary host, subtitle host, and any host that looks like CDN
         // This fixes video-only / audio-only issues where audio and video are on different subdomains
         // We still block private IPs and localhost to prevent SSRF
-        let is_allowed = {
-            let Some(extracted) = extracted_host.as_deref() else {
-                false
-            };
-            // Block private/local hosts
-            let lower = extracted.to_ascii_lowercase();
-            let is_private = lower == "localhost"
-                || lower.starts_with("127.")
-                || lower.starts_with("10.")
-                || lower.starts_with("192.168.")
-                || lower.starts_with("172.16.")
-                || lower.starts_with("172.17.")
-                || lower.starts_with("172.18.")
-                || lower.starts_with("172.19.")
-                || lower.starts_with("172.20.")
-                || lower.starts_with("172.21.")
-                || lower.starts_with("172.22.")
-                || lower.starts_with("172.23.")
-                || lower.starts_with("172.24.")
-                || lower.starts_with("172.25.")
-                || lower.starts_with("172.26.")
-                || lower.starts_with("172.27.")
-                || lower.starts_with("172.28.")
-                || lower.starts_with("172.29.")
-                || lower.starts_with("172.30.")
-                || lower.starts_with("172.31.")
-                || lower == "0.0.0.0"
-                || lower.starts_with("[::1]")
-                || lower.starts_with("::1");
-            if is_private {
-                false
-            } else if let Some(allowed) = target_host {
-                // Allow primary host, subtitle host, or any host that shares same base domain pattern
-                // For MovieBox, allow any *.hakunaymatata.com, *.aoneroom.com, etc
-                if extracted == allowed {
-                    true
-                } else if sub_host.as_deref() == Some(extracted) {
-                    true
+        let is_allowed = match extracted_host.as_deref() {
+            None => false,
+            Some(extracted) => {
+                // Block private/local hosts
+                let lower = extracted.to_ascii_lowercase();
+                let is_private = lower == "localhost"
+                    || lower.starts_with("127.")
+                    || lower.starts_with("10.")
+                    || lower.starts_with("192.168.")
+                    || lower.starts_with("172.16.")
+                    || lower.starts_with("172.17.")
+                    || lower.starts_with("172.18.")
+                    || lower.starts_with("172.19.")
+                    || lower.starts_with("172.20.")
+                    || lower.starts_with("172.21.")
+                    || lower.starts_with("172.22.")
+                    || lower.starts_with("172.23.")
+                    || lower.starts_with("172.24.")
+                    || lower.starts_with("172.25.")
+                    || lower.starts_with("172.26.")
+                    || lower.starts_with("172.27.")
+                    || lower.starts_with("172.28.")
+                    || lower.starts_with("172.29.")
+                    || lower.starts_with("172.30.")
+                    || lower.starts_with("172.31.")
+                    || lower == "0.0.0.0"
+                    || lower.starts_with("[::1]")
+                    || lower.starts_with("::1");
+                if is_private {
+                    false
+                } else if let Some(allowed) = target_host {
+                    // Allow primary host, subtitle host, or any host that shares same base domain pattern
+                    // For MovieBox, allow any *.hakunaymatata.com, *.aoneroom.com, etc
+                    if extracted == allowed {
+                        true
+                    } else if sub_host.as_deref() == Some(extracted) {
+                        true
+                    } else {
+                        // Allow any host that is a known CDN or has similar pattern
+                        // This is permissive but safe since proxy is local-only and short-lived
+                        true
+                    }
                 } else {
-                    // Allow any host that is a known CDN or has similar pattern
-                    // This is permissive but safe since proxy is local-only and short-lived
-                    true
+                    false
                 }
-            } else {
-                false
             }
         };
         if !is_allowed {
