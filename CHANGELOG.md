@@ -18,6 +18,12 @@
   - Scoped Snap package detection to `SNAP_NAME` matching `moviebox-tui` to prevent false positive Snap environment detection when launched inside unrelated host sandboxes.
 
 ### Changed
+- **Web player (Sakshi-first rotation)**:
+  - Auto-play now tries servers in order: Sakshi, then Ritu, then Siddharth, then the rest, one after another. Each server's links and mirrors are tried before moving on. The source picker still defaults to Siddharth.
+  - Play automatically stays available once a title loads, even when the origin server has no links.
+  - Stream lists keep the API's release index, so the link that is displayed is the link that gets played.
+  - Redesigned the player page with a stage, a control bar showing the server rotation, and a links list.
+- **Web downloads**: every link (and mirror) now has its own Download button in the stream list and on the player page.
 - **Dependencies & Build Infrastructure**:
   - Upgraded `sha2` to 0.11 with chunked streaming hash updates, preserving non-blocking checksum verification for release archives.
   - Upgraded `dirs` to 7.0, `futures` to 0.3.34, and `zip` to 8.6 across platform config paths, async tasks, and updater archive extraction.

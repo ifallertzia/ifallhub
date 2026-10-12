@@ -21,7 +21,10 @@ const state = {
   discoverItems: [],
   requestNumber: 0,
   currentRoute: '/',
-  fallbackProvidersTried: [],
+  providerCache: {},
+  serverOrder: [],
+  serverStatus: {},
+  currentServer: null,
   isNavigating: false,
   playbackHistory: [],
 };
@@ -52,14 +55,10 @@ let detailRequestNumber = 0;
 // Faster switching: reduced from 15000 to 6500ms for quick fallback
 const STREAM_START_TIMEOUT_MS = 6500;
 const STABLE_PLAYBACK_MS = 1200;
-const PROVIDER_PRIORITY = {
-  moviebox: 0,
-  fourkhdhub: 1,
-  dramachi: 2,
-  addons: 3,
-  bdix_circleftp: 4,
-  bdix_dhakaflix: 5,
-};
+// Auto-play order: Sakshi (dramachi) first, then Ritu, then Siddharth, then the rest.
+// The source picker still defaults to Siddharth; this only controls playback order.
+const SERVER_ROTATION = ['dramachi', 'fourkhdhub', 'moviebox', 'addons', 'bdix_circleftp', 'bdix_dhakaflix'];
+const PROVIDER_PRIORITY = Object.fromEntries(SERVER_ROTATION.map((provider, index) => [provider, index]));
 
 function escapeHtml(value = '') {
   return String(value).replace(/[&<>"']/g, (char) => ({
@@ -339,7 +338,9 @@ async function handleRoute() {
   } else if (route.name === 'player') {
     showPage('player');
     // If no active playback, go back to details or home
-    if (!state.streamSetId || !state.releases.length) {
+    // Auto-play navigates here before the origin server's links have loaded
+    // (it resolves servers itself), so only bounce when nothing is playing.
+    if (!state.autoPlaybackActive && (!state.streamSetId || !state.releases.length)) {
       // Try to recover from history or go home
       if (state.item) {
         navigate(`/title/${encodeURIComponent(itemProvider(state.item))}/${encodeURIComponent(itemId(state.item))}`, true);
@@ -599,7 +600,7 @@ function renderDetailsPage(details) {
       </div>
       <div class="stream-list" id="stream-list"><div class="detail-busy"><span class="loading-spinner"></span>Finding available streams…</div></div>
       <div class="stream-actions">
-        <div class="stream-note">Streams are prepared by your Ifallhub player. Best playable links are shown first.</div>
+        <div class="stream-note">Play automatically tries Sakshi, then Ritu, then Siddharth, then the other servers, in order. Every link also has its own download button.</div>
         <button class="play-button" id="play-selected" type="button" disabled>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z" /></svg><span>Play automatically</span>
         </button>
@@ -638,7 +639,7 @@ function renderDetailsPage(details) {
       state.episode = Number(event.target.value);
       loadStreams();
     });
-    $('#play-selected', root)?.addEventListener('click', playSelected);
+    $('#play-selected', root)?.addEventListener('click', () => playSelected());
   };
 
   if (detailsPageContent) attachEvents(detailsPageContent);
@@ -651,7 +652,10 @@ async function openDetails(item, isRouteNavigation = false) {
   state.releases = [];
   state.streamSetId = null;
   state.selectedRelease = 0;
-  state.fallbackProvidersTried = [];
+  state.providerCache = {};
+  state.serverOrder = [];
+  state.serverStatus = {};
+  state.currentServer = null;
   const request = ++detailRequestNumber;
   renderDetailsLoading();
   if (!isRouteNavigation) {
@@ -689,67 +693,95 @@ async function openDetails(item, isRouteNavigation = false) {
   }
 }
 
+function playButtonEl() {
+  return $('#play-selected', detailsPageContent) || $('#play-selected', detailsContent);
+}
+
+function streamListEl() {
+  return $('#stream-list', detailsPageContent) || $('#stream-list', detailsContent);
+}
+
+function streamSubtitleEl() {
+  return $('#stream-subtitle', detailsPageContent) || $('#stream-subtitle', detailsContent);
+}
+
+const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+// Builds a sorted release list for one server. `serverIndex` keeps the position
+// the API used when it stored the stream set, so /api/play always points at the
+// release that was displayed, even after we re-sort for display.
+function buildStreamEntry(provider, item, response = {}) {
+  const raw = response.releases || response.streams || [];
+  const releases = sortReleases(raw.map((release, serverIndex) => ({ ...release, serverIndex })));
+  return { provider, item, streamSetId: response.stream_set_id || null, releases };
+}
+
+function applyActiveEntry(entry, selected = 0) {
+  state.streamSetId = entry.streamSetId;
+  state.releases = entry.releases;
+  state.selectedRelease = selected;
+}
+
 async function loadStreams() {
-  const list = $('#stream-list', detailsPageContent) || $('#stream-list', detailsContent);
-  const subtitle = $('#stream-subtitle', detailsPageContent) || $('#stream-subtitle', detailsContent);
-  const playButton = $('#play-selected', detailsPageContent) || $('#play-selected', detailsContent);
+  const list = streamListEl();
+  const subtitle = streamSubtitleEl();
   if (!state.item) return;
 
+  state.providerCache = {};
   state.streamSetId = null;
   state.releases = [];
   state.selectedRelease = 0;
-  if (playButton) playButton.disabled = true;
+  setPlayButtonsEnabled();
   if (list) list.innerHTML = '<div class="detail-busy"><span class="loading-spinner"></span>Finding available streams…</div>';
   if (subtitle) subtitle.textContent = 'Checking configured sources…';
   const request = ++detailRequestNumber;
+  const provider = itemProvider(state.item);
 
   try {
     const response = await api(apiUrl('/api/streams', {
-      provider: itemProvider(state.item),
+      provider,
       id: itemId(state.item),
       season: state.season,
       episode: state.episode,
       is_series: state.isSeries,
     }));
     if (request !== detailRequestNumber) return;
-    state.streamSetId = response.stream_set_id || null;
-    let releases = response.releases || response.streams || [];
-    // Sort to bring playable links to top before playing
-    releases = sortReleases(releases);
-    state.releases = releases;
+    const entry = buildStreamEntry(provider, state.item, response);
+    state.providerCache[provider] = entry;
+    applyActiveEntry(entry);
     if (subtitle) {
-      const total = state.releases.length;
-      subtitle.textContent = total ? `${total} stream${total === 1 ? '' : 's'} found — best first` : 'No streams found for this title.';
+      const total = entry.releases.length;
+      subtitle.textContent = total
+        ? `${total} stream${total === 1 ? '' : 's'} found — best first`
+        : 'No streams on this server. Play automatically will check the others.';
     }
     renderStreams();
   } catch (error) {
     if (request !== detailRequestNumber) return;
-    if (subtitle) subtitle.textContent = 'The source could not be reached.';
+    if (subtitle) subtitle.textContent = 'This server could not be reached. Play automatically will try the others.';
     if (list) list.innerHTML = `<div class="stream-empty stream-error">${escapeHtml(displayUiText(error.message || 'Could not load streams.'))}</div>`;
   }
 }
 
-function renderStreams() {
-  const list = $('#stream-list', detailsPageContent) || $('#stream-list', detailsContent);
-  const playButton = $('#play-selected', detailsPageContent) || $('#play-selected', detailsContent);
-  const playerList = $('#player-stream-list');
-  if (!list && !playerList) return;
-  const targetLists = [list, playerList].filter(Boolean);
-  if (!state.releases.length) {
-    targetLists.forEach(l => {
-      l.innerHTML = '<div class="stream-empty">No playable streams are available. Try another provider or check your add-on setup.</div>';
-    });
-    if (playButton) playButton.disabled = true;
-    return;
-  }
-
-  const html = state.releases.map((release, index) => {
-    const quality = release.quality || 'AUTO';
-    const source = providerLabel(release.provider || state.provider);
-    const filename = displayUiText(release.filename || 'Stream');
-    const fields = [release.codec, release.language, prettySize(release.size_bytes)].filter(Boolean);
-    const isSelected = index === state.selectedRelease;
+function renderStreamRow(release, index) {
+  const quality = release.quality || 'AUTO';
+  const source = providerLabel(release.provider || state.provider);
+  const filename = displayUiText(release.filename || 'Stream');
+  const fields = [release.codec, release.language, prettySize(release.size_bytes)].filter(Boolean);
+  const isSelected = index === state.selectedRelease;
+  const mirrors = release.mirrors?.length ? release.mirrors : [{ label: '' }];
+  const downloads = mirrors.map((mirror, mirrorIndex) => {
+    const mirrorLabel = mirror.label || `Link ${mirrorIndex + 1}`;
+    const text = mirrors.length > 1 ? mirrorLabel : 'Download';
     return `
+      <button class="stream-download" type="button" data-download-index="${index}" data-mirror-index="${mirrorIndex}" title="Download via ${escapeHtml(mirrorLabel)}" aria-label="Download ${escapeHtml(filename)} via ${escapeHtml(mirrorLabel)}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14" /></svg>
+        <span class="stream-download-label">${escapeHtml(text)}</span>
+      </button>`;
+  }).join('');
+
+  return `
+    <div class="stream-row ${isSelected ? 'selected' : ''}">
       <button class="stream-option ${isSelected ? 'selected' : ''}" type="button" data-release-index="${index}">
         <span class="stream-quality">${escapeHtml(quality)}</span>
         <span class="stream-main">
@@ -759,187 +791,351 @@ function renderStreams() {
         <span class="stream-source" title="${escapeHtml(source)}">${escapeHtml(source)}</span>
         <span class="stream-check">${isSelected ? '✓' : ''}</span>
       </button>
-    `;
-  }).join('');
+      <div class="stream-downloads">${downloads}</div>
+    </div>
+  `;
+}
 
-  targetLists.forEach(l => l.innerHTML = html);
+function renderStreams() {
+  const lists = [streamListEl(), $('#player-stream-list')].filter(Boolean);
+  if (!lists.length) return;
 
-  targetLists.forEach(l => {
-    $$('.stream-option', l).forEach((button) => {
-      button.addEventListener('click', () => {
-        state.selectedRelease = Number(button.dataset.releaseIndex);
-        renderStreams();
-        // If already in player page, auto play selected
-        if (state.currentRoute === 'player') playSelected();
-      });
+  if (!state.releases.length) {
+    lists.forEach((list) => {
+      list.innerHTML = '<div class="stream-empty">No links on this server yet. Play automatically will check the other servers in order.</div>';
+      list.onclick = onStreamListClick;
     });
-  });
-  if (playButton) playButton.disabled = !state.streamSetId || state.autoPlaybackActive;
-}
-
-async function tryNextProvider() {
-  const currentTitle = state.details?.title || state.item?.title;
-  if (!currentTitle) return false;
-  const allProviders = ['moviebox','fourkhdhub','dramachi','addons','bdix_circleftp','bdix_dhakaflix'];
-  const current = String(itemProvider(state.item) || state.provider).toLowerCase();
-  const candidates = allProviders.filter(p => p !== current && !state.fallbackProvidersTried.includes(p));
-  // Sort by priority
-  candidates.sort((a,b) => (PROVIDER_PRIORITY[a] ?? 10) - (PROVIDER_PRIORITY[b] ?? 10));
-
-  for (const nextProvider of candidates) {
-    try {
-      state.fallbackProvidersTried.push(nextProvider);
-      const statusEl = $('#player-status');
-      if (statusEl) statusEl.textContent = `Trying ${providerLabel(nextProvider)} for "${currentTitle}"…`;
-      const searchRes = await api(apiUrl('/api/search', { q: currentTitle, provider: nextProvider, page: 1 }));
-      if (!searchRes.length) continue;
-      // Find best match by title similarity (simple includes)
-      let best = searchRes[0];
-      const lowerTitle = currentTitle.toLowerCase();
-      const exact = searchRes.find(r => r.title && r.title.toLowerCase() === lowerTitle);
-      if (exact) best = exact;
-      else {
-        const partial = searchRes.find(r => r.title && (r.title.toLowerCase().includes(lowerTitle) || lowerTitle.includes(r.title.toLowerCase())));
-        if (partial) best = partial;
-      }
-      // Load its streams
-      state.item = best;
-      syncProvider(nextProvider);
-      const streamsRes = await api(apiUrl('/api/streams', {
-        provider: nextProvider,
-        id: itemId(best),
-        season: state.season,
-        episode: state.episode,
-        is_series: state.isSeries,
-      }));
-      let releases = streamsRes.releases || streamsRes.streams || [];
-      if (!releases.length) continue;
-      releases = sortReleases(releases);
-      state.streamSetId = streamsRes.stream_set_id;
-      state.releases = releases;
-      state.selectedRelease = 0;
-      renderStreams();
-      // Try to play this new provider's streams
-      if (statusEl) statusEl.textContent = `Found ${releases.length} streams in ${providerLabel(nextProvider)}, trying…`;
-      return true;
-    } catch (e) {
-      console.warn(`Fallback to ${nextProvider} failed:`, e);
-      continue;
-    }
+  } else {
+    const html = state.releases.map(renderStreamRow).join('');
+    lists.forEach((list) => {
+      list.innerHTML = html;
+      list.onclick = onStreamListClick;
+    });
   }
-  return false;
+  setPlayButtonsEnabled();
 }
 
-async function playSelected() {
-  if (!state.releases.length || !state.streamSetId || state.autoPlaybackActive) return;
+// The details page and the legacy dialog both carry a Play button; keep them in sync.
+function setPlayButtonsEnabled() {
+  const enabled = Boolean(state.details) && !state.autoPlaybackActive;
+  $$('#play-selected').forEach((button) => { button.disabled = !enabled; });
+}
 
-  const button = $('#play-selected', detailsPageContent) || $('#play-selected', detailsContent);
-  const title = state.details?.title || state.item?.title || 'Now playing';
-  const firstRelease = Math.min(Math.max(Number(state.selectedRelease) || 0, 0), state.releases.length - 1);
+function onStreamListClick(event) {
+  const downloadButton = event.target.closest('[data-download-index]');
+  if (downloadButton) {
+    event.preventDefault();
+    downloadRelease(
+      Number(downloadButton.dataset.downloadIndex),
+      Number(downloadButton.dataset.mirrorIndex),
+      downloadButton,
+    );
+    return;
+  }
+  const option = event.target.closest('[data-release-index]');
+  if (!option) return;
+  state.selectedRelease = Number(option.dataset.releaseIndex);
+  renderStreams();
+  if (state.currentRoute === 'player') {
+    // A manual pick overrides whatever automatic run is in progress.
+    state.playbackRunId += 1;
+    state.autoPlaybackActive = false;
+    state.playbackController?.abort();
+    playSelected({ manual: true });
+  }
+}
+
+// --- Server rotation ---
+// Returns the servers in the order they should be tried after `provider`,
+// wrapping around so every server still gets a turn.
+function rotationAfter(provider) {
+  const index = SERVER_ROTATION.indexOf(provider);
+  if (index < 0) return [...SERVER_ROTATION];
+  return [...SERVER_ROTATION.slice(index + 1), ...SERVER_ROTATION.slice(0, index + 1)];
+}
+
+function pickBestMatch(results, title) {
+  const lowerTitle = String(title || '').toLowerCase();
+  const exact = results.find((r) => r.title && r.title.toLowerCase() === lowerTitle);
+  if (exact) return exact;
+  const partial = results.find((r) => r.title && (
+    r.title.toLowerCase().includes(lowerTitle) || lowerTitle.includes(r.title.toLowerCase())
+  ));
+  return partial || results[0];
+}
+
+function buildAttempts(releases, firstIndex = 0) {
   const attempts = [];
-  for (let offset = 0; offset < state.releases.length; offset += 1) {
-    const releaseIndex = (firstRelease + offset) % state.releases.length;
-    const mirrorCount = Math.max(1, state.releases[releaseIndex].mirrors?.length || 1);
+  const total = releases.length;
+  for (let offset = 0; offset < total; offset += 1) {
+    const releaseIndex = (firstIndex + offset) % total;
+    const mirrorCount = Math.max(1, releases[releaseIndex].mirrors?.length || 1);
     for (let mirrorIndex = 0; mirrorIndex < mirrorCount; mirrorIndex += 1) {
       attempts.push({ releaseIndex, mirrorIndex });
     }
   }
+  return attempts;
+}
 
+// Loads the streams for this title from one server. The origin server's list is
+// reused; other servers are searched by title first. Returns null when the
+// server has nothing playable for this title.
+async function resolveServerStreams(provider, title) {
+  const cached = state.providerCache[provider];
+  if (cached) return cached.releases.length ? cached : null;
+  try {
+    let item = null;
+    if (state.item && itemProvider(state.item) === provider) {
+      item = state.item;
+    } else {
+      if (!title) return null;
+      const results = await api(apiUrl('/api/search', { q: title, provider, page: 1 }));
+      if (!Array.isArray(results) || !results.length) return null;
+      item = pickBestMatch(results, title);
+    }
+    const response = await api(apiUrl('/api/streams', {
+      provider,
+      id: itemId(item),
+      season: state.season,
+      episode: state.episode,
+      is_series: state.isSeries,
+    }));
+    const entry = buildStreamEntry(provider, item, response);
+    if (!entry.releases.length || !entry.streamSetId) return null;
+    state.providerCache[provider] = entry;
+    return entry;
+  } catch (error) {
+    console.warn(`${provider} has no usable streams for this title:`, error);
+    return null;
+  }
+}
+
+const STATUS_LABELS = {
+  idle: 'Waiting',
+  loading: 'Checking',
+  trying: 'Trying',
+  failed: 'Failed',
+  empty: 'No links',
+  playing: 'Playing',
+};
+
+function setServerStatus(provider, status) {
+  state.serverStatus[provider] = status;
+  renderServerRotation();
+}
+
+function renderServerRotation() {
+  const bar = $('#server-rotation');
+  if (!bar) return;
+  const order = state.serverOrder || [];
+  bar.innerHTML = order.map((provider, index) => {
+    const status = state.serverStatus[provider] || 'idle';
+    const arrow = index < order.length - 1 ? '<span class="server-arrow" aria-hidden="true">→</span>' : '';
+    return `<span class="server-chip is-${status}">
+        <span class="server-step">${index + 1}</span>
+        <span class="server-name">${escapeHtml(providerLabel(provider))}</span>
+        <span class="server-state">${escapeHtml(STATUS_LABELS[status] || status)}</span>
+      </span>${arrow}`;
+  }).join('');
+}
+
+function setPlayerHeader(title, quality, source) {
+  const titleEl = $('#player-page-title') || $('#player-title');
+  const qEl = $('#player-page-quality') || $('#player-quality');
+  const sEl = $('#player-page-source') || $('#player-source');
+  if (titleEl) titleEl.textContent = title;
+  if (qEl) qEl.textContent = String(quality || 'AUTO').toUpperCase();
+  if (sEl) sEl.textContent = source;
+}
+
+function setPlayerStatus(text, busy = false) {
+  const statusEl = $('#player-status');
+  if (statusEl) statusEl.textContent = text;
+  $('#player-control-bar')?.classList.toggle('is-busy', busy);
+}
+
+let toastTimer = 0;
+function showToast(message, tone = 'info') {
+  const toast = $('#toast');
+  if (!toast) return;
+  toast.textContent = message;
+  toast.className = `toast is-visible is-${tone}`;
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => toast.classList.remove('is-visible'), 4200);
+}
+
+function triggerDownload(url, filename) {
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.rel = 'noopener';
+  try {
+    if (new URL(url, window.location.href).origin !== window.location.origin) link.target = '_blank';
+  } catch { /* relative or invalid URL: keep default behaviour */ }
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+// Downloads one link (release + mirror) without starting the player.
+async function downloadRelease(releaseIndex, mirrorIndex, button) {
+  const release = state.releases[releaseIndex];
+  if (!release || !state.streamSetId) {
+    showToast('Links are still loading. Try again in a moment.', 'error');
+    return;
+  }
+  const label = button?.querySelector('.stream-download-label');
+  const originalLabel = label?.textContent;
+  if (button) button.disabled = true;
+  if (label) label.textContent = 'Preparing…';
+  try {
+    const playback = await api('/api/play', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        stream_set_id: state.streamSetId,
+        release_index: release.serverIndex ?? releaseIndex,
+        mirror_index: mirrorIndex,
+      }),
+    });
+    const url = playback.playback_url || playback.url;
+    if (!url) throw new Error('This link did not return a downloadable file.');
+    const type = String(playback.stream_type || 'file').toLowerCase();
+    if (type !== 'file') {
+      showToast(`This link is a ${type.toUpperCase()} stream split into segments, so it can't be saved as a single file. Try another link.`, 'warn');
+      return;
+    }
+    const filename = (displayUiText(release.filename) || 'download').replace(/[\\/:*?"<>|]+/g, '_');
+    triggerDownload(url, filename);
+    showToast(`Download started: ${filename}`, 'success');
+  } catch (error) {
+    showToast(displayUiText(error.message || 'Download could not start.'), 'error');
+  } finally {
+    if (button) button.disabled = false;
+    if (label) label.textContent = originalLabel;
+  }
+}
+
+// "Play automatically": tries Sakshi first, then Ritu, then Siddharth, then the
+// rest, one after another. Within each server, every link and mirror is tried
+// before moving on. A manual pick (clicking a link on the player page) tries that
+// link first, then the rest of its server, then the other servers in order.
+async function playSelected(options = {}) {
+  if (state.autoPlaybackActive) return;
+  if (!state.details && !state.item) return;
+
+  const manual = Boolean(options.manual);
+  const chosenRelease = state.selectedRelease;
+  const manualProvider = manual ? itemProvider(state.item) : null;
+  let order;
+  if (manual) order = [manualProvider, ...SERVER_ROTATION.filter((p) => p !== manualProvider)];
+  else if (options.startAfter) order = rotationAfter(options.startAfter);
+  else order = [...SERVER_ROTATION];
+
+  const title = state.details?.title || state.item?.title || 'Now playing';
   const runId = ++state.playbackRunId;
+  const button = playButtonEl();
   state.autoPlaybackActive = true;
+  state.serverOrder = order;
+  state.serverStatus = {};
+  state.currentServer = null;
   if (button) {
     button.disabled = true;
     const span = button.querySelector('span');
-    if (span) span.textContent = 'Trying streams…';
+    if (span) span.textContent = 'Trying servers…';
   }
-  // Navigate to player sub-page (same tab), not popup
   if (state.currentRoute !== 'player') {
     navigate('/watch', false);
     showPage('player');
   }
-  const playerTitle = $('#player-page-title') || $('#player-title');
-  if (playerTitle) playerTitle.textContent = title;
   if (videoError) videoError.hidden = true;
+  setPlayerHeader(title, 'AUTO', providerLabel(order[0]));
+  renderServerRotation();
+  setPlayerStatus(`Checking ${providerLabel(order[0])} first…`, true);
 
-  const playerStatus = $('#player-status');
   let lastError = '';
   try {
-    for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
-      if (runId !== state.playbackRunId) break;
+    for (const provider of order) {
+      if (runId !== state.playbackRunId) return;
+      setServerStatus(provider, 'loading');
+      setPlayerStatus(`Checking ${providerLabel(provider)} for "${title}"…`, true);
 
-      const { releaseIndex, mirrorIndex } = attempts[attemptIndex];
-      const release = state.releases[releaseIndex];
-      const quality = release.quality || 'AUTO';
-      const provider = release.provider || itemProvider(state.item) || state.provider;
-      const sourceName = providerLabel(provider);
-      state.selectedRelease = releaseIndex;
+      const entry = await resolveServerStreams(provider, title);
+      if (runId !== state.playbackRunId) return;
+      if (!entry) {
+        setServerStatus(provider, 'empty');
+        continue;
+      }
+
+      state.item = entry.item;
+      const firstIndex = manual && provider === manualProvider
+        ? Math.min(Math.max(Number(chosenRelease) || 0, 0), entry.releases.length - 1)
+        : 0;
+      applyActiveEntry(entry, firstIndex);
       renderStreams();
-      const qEl = $('#player-page-quality') || $('#player-quality');
-      const sEl = $('#player-page-source') || $('#player-source');
-      if (qEl) qEl.textContent = String(quality).toUpperCase();
-      if (sEl) sEl.textContent = sourceName;
-      if (playerTitle) playerTitle.textContent = displayUiText(release.filename || title);
-      if (playerStatus) {
-        playerStatus.textContent = `Trying ${sourceName} · ${quality} (${attemptIndex + 1} of ${attempts.length})…`;
-      }
-      if (videoError) videoError.hidden = true;
 
-      await closeActivePlayer();
-      if (runId !== state.playbackRunId) break;
+      const attempts = buildAttempts(entry.releases, firstIndex);
+      const sourceName = providerLabel(provider);
+      let attemptNo = 0;
+      for (const { releaseIndex, mirrorIndex } of attempts) {
+        if (runId !== state.playbackRunId) return;
+        const release = entry.releases[releaseIndex];
+        const quality = String(release.quality || 'AUTO').toUpperCase();
+        attemptNo += 1;
+        state.selectedRelease = releaseIndex;
+        state.currentServer = provider;
+        setServerStatus(provider, 'trying');
+        renderStreams();
+        setPlayerHeader(displayUiText(release.filename || title), quality, sourceName);
+        setPlayerStatus(`Trying ${sourceName} · ${quality} (${attemptNo} of ${attempts.length})…`, true);
 
-      try {
-        const playback = await api('/api/play', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            stream_set_id: state.streamSetId,
-            release_index: releaseIndex,
-            mirror_index: mirrorIndex,
-          }),
-        });
-        if (runId !== state.playbackRunId) break;
+        await closeActivePlayer();
+        if (runId !== state.playbackRunId) return;
 
-        const result = await openPlayer(playback, title, runId, quality, provider);
-        if (result.played) {
-          if (playerStatus) {
-            playerStatus.textContent = `Now playing · ${sourceName} · ${quality}. Automatic switching stopped.`;
+        try {
+          const playback = await api('/api/play', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              stream_set_id: entry.streamSetId,
+              release_index: release.serverIndex ?? releaseIndex,
+              mirror_index: mirrorIndex,
+            }),
+          });
+          if (runId !== state.playbackRunId) return;
+
+          const result = await openPlayer(playback, title, runId, quality, provider);
+          if (result.played) {
+            state.playbackHistory.push({ provider, quality, title, time: Date.now() });
+            setServerStatus(provider, 'playing');
+            setPlayerStatus(`Now playing on ${sourceName} · ${quality}. If this link doesn't work, download any link below.`, false);
+            return;
           }
-          state.playbackHistory.push({ provider, quality, title, time: Date.now() });
-          return;
+          if (result.cancelled) return;
+          lastError = result.error?.message || 'This stream could not be started.';
+        } catch (error) {
+          if (runId !== state.playbackRunId) return;
+          lastError = error.message || 'This stream could not be prepared.';
         }
-        if (result.cancelled) break;
-        lastError = result.error?.message || 'This stream could not be started.';
-        // Fast fail - don't wait long
-        if (playerStatus) playerStatus.textContent = `Failed ${sourceName} · ${quality}, trying next…`;
-      } catch (error) {
-        if (runId !== state.playbackRunId) break;
-        lastError = error.message || 'This stream could not be prepared.';
+        await wait(200);
       }
-      // Small delay between attempts for speed, but not too much
-      await new Promise(r => setTimeout(r, 200));
+      setServerStatus(provider, 'failed');
+      setPlayerStatus(`${sourceName} has no working link. Moving to the next server…`, true);
     }
 
-    // If all attempts in current provider failed, try next provider automatically
     if (runId === state.playbackRunId) {
-      if (playerStatus) playerStatus.textContent = `All ${attempts.length} streams failed in ${providerLabel(itemProvider(state.item))}, searching other sources…`;
-      const foundNext = await tryNextProvider();
-      if (foundNext) {
-        // Recursively try the new provider's streams
-        state.autoPlaybackActive = false;
-        return playSelected();
-      }
-      const detail = lastError ? ` ${displayUiText(lastError)}` : '';
-      showVideoError(`None of the ${attempts.length} available streams could be started.${detail} Tried other sources too.`);
-      if (playerStatus) {
-        playerStatus.textContent = `Tried all ${attempts.length} streams plus other sources. Try another title or source.`;
-      }
+      const detail = lastError ? ` Last error: ${displayUiText(lastError)}` : '';
+      showVideoError(`No server could start this title (${order.map(providerLabel).join(' → ')}).${detail} Try the next server, or download a link below.`);
+      setPlayerStatus('No link could start. Download any link below, or try again.', false);
     }
   } finally {
-    if (runId === state.playbackRunId) state.autoPlaybackActive = false;
-    if (button && (runId === state.playbackRunId || !state.autoPlaybackActive)) {
-      button.disabled = !state.streamSetId || state.autoPlaybackActive;
-      const span = button.querySelector('span');
-      if (span) span.textContent = 'Play automatically';
+    if (runId === state.playbackRunId) {
+      state.autoPlaybackActive = false;
+      if (button) {
+        const span = button.querySelector('span');
+        if (span) span.textContent = 'Play automatically';
+      }
+      renderStreams();
     }
   }
 }
@@ -1357,14 +1553,11 @@ if (playerBackBtn) playerBackBtn.addEventListener('click', () => {
 });
 
 const videoRetryBtn = $('#video-retry-button');
-if (videoRetryBtn) videoRetryBtn.addEventListener('click', async () => {
-  const found = await tryNextProvider();
-  if (found) {
-    state.autoPlaybackActive = false;
-    playSelected();
-  } else {
-    showVideoError('No more sources found. Try another title.');
-  }
+if (videoRetryBtn) videoRetryBtn.addEventListener('click', () => {
+  // Continue the rotation after the server that failed last, wrapping around.
+  state.playbackRunId += 1;
+  state.autoPlaybackActive = false;
+  playSelected({ startAfter: state.currentServer || undefined });
 });
 
 // Handle browser back/forward
