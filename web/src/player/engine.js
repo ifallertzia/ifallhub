@@ -18,6 +18,138 @@ const QUALITY_SCORES = [
   [/360/i, 4],
 ];
 
+// Codecs/containers the browser cannot play. MovieBox DASH releases are often
+// HEVC (`_h265_` paths, `codecName: h265`) and several 4KHDHub mirrors serve
+// `.mkv`; both make <video>/Shaka fail with "Playback error" while mpv/VLC
+// play them fine. They are ranked last (never dropped) so a manual pick or the
+// download button still works.
+const UNSUPPORTED_CODEC = /(^|[^a-z])(hevc|h\.?265|x\.?265|hvc1|hev1|hvc2|dvh1|dolby\s*vision)([^a-z]|$)/i;
+const UNSUPPORTED_CONTAINER = /\.(mkv|avi|wmv|flv|divx|m2ts|vob)([?#\s]|$)/i;
+
+/** `''` when the browser can probably play it, otherwise `'codec'`/`'container'`. */
+export function unsupportedReason(release = {}) {
+  const text = `${release.codec || ''} ${release.filename || ''} ${release.quality || ''}`;
+  if (UNSUPPORTED_CONTAINER.test(text)) return 'container';
+  if (UNSUPPORTED_CODEC.test(text)) return 'codec';
+  return '';
+}
+
+export const ERROR_KINDS = {
+  codec: 'codec',
+  http: 'http',
+  network: 'network',
+  timeout: 'timeout',
+  unknown: 'unknown',
+};
+
+function playbackError(message, kind = ERROR_KINDS.unknown, status = 0) {
+  const error = new Error(message);
+  error.name = 'PlaybackError';
+  error.kind = kind;
+  if (status) error.status = status;
+  return error;
+}
+
+function hostOf(url = '') {
+  try {
+    return new URL(url).host;
+  } catch {
+    return '';
+  }
+}
+
+/** Maps a Shaka error (event.detail) to a message the user can act on. */
+export function describeShakaError(detail = {}) {
+  const code = Number(detail.code) || 0;
+  const data = Array.isArray(detail.data) ? detail.data : [];
+  const status = typeof data[0] === 'number' ? data[0] : 0;
+  const url = typeof data[1] === 'string' ? data[1] : '';
+  const raw = String(detail.message || '');
+
+  if (code === 4032 || /unsupported by (this|the) browser|not supported by (this|the) browser/i.test(raw)) {
+    return playbackError(
+      'This release uses a codec the browser cannot decode (usually H.265/HEVC). Trying the next link…',
+      ERROR_KINDS.codec,
+    );
+  }
+  if (status === 401 || status === 403) {
+    return playbackError(
+      `The stream host refused the request (HTTP ${status}) — the signed link or its cookie expired. Refreshing the links…`,
+      ERROR_KINDS.http,
+      status,
+    );
+  }
+  if (status === 404 || status === 410) {
+    return playbackError(
+      `The stream link is gone (HTTP ${status}) — it expired upstream. Refreshing the links…`,
+      ERROR_KINDS.http,
+      status,
+    );
+  }
+  if (status >= 500) {
+    return playbackError(
+      `The stream host answered with HTTP ${status}${hostOf(url) ? ` (${hostOf(url)})` : ''}. Trying the next link…`,
+      ERROR_KINDS.http,
+      status,
+    );
+  }
+  if ([1000, 1001, 1002, 1003, 1006, 1007].includes(code) || detail.category === 1) {
+    return playbackError(
+      status
+        ? `Could not load the stream (HTTP ${status})${hostOf(url) ? ` from ${hostOf(url)}` : ''}.`
+        : 'The stream host could not be reached (network or blocked request).',
+      ERROR_KINDS.network,
+      status,
+    );
+  }
+  if (raw) return playbackError(`Stream error: ${raw}`, ERROR_KINDS.unknown, status);
+  return playbackError(`Stream error ${code || ''}`.trim(), ERROR_KINDS.unknown, status);
+}
+
+/** Maps a `<video>` element MediaError to a message the user can act on. */
+export function describeMediaError(video) {
+  const error = video?.error;
+  if (!error) return playbackError('The browser could not play this stream.', ERROR_KINDS.unknown);
+  const detail = error.message ? ` (${error.message})` : '';
+  switch (error.code) {
+    case 4:
+      return playbackError(
+        `The browser cannot play this file${detail} — it is an unsupported container or codec, usually .mkv or H.265/HEVC.`,
+        ERROR_KINDS.codec,
+      );
+    case 3:
+      return playbackError(
+        `The stream downloaded but could not be decoded${detail} — the browser lacks this codec.`,
+        ERROR_KINDS.codec,
+      );
+    case 2:
+      return playbackError('The stream stopped downloading — the stream host or the network dropped it.', ERROR_KINDS.network);
+    case 1:
+      return playbackError('Playback was aborted before it started.', ERROR_KINDS.unknown);
+    default:
+      return playbackError(`Playback error ${error.code}${detail}`.trim(), ERROR_KINDS.unknown);
+  }
+}
+
+/** True when a link failed because the signed/stream list expired (needs refresh). */
+export function isExpiredLinkError(error) {
+  if (!error) return false;
+  if (error.status === 403 || error.status === 410) return true;
+  return /expired|refresh the stream list|no longer valid/i.test(String(error.message || ''));
+}
+
+/** Finds the same release in a freshly fetched list (refresh keeps the user's pick). */
+export function matchReleaseIndex(releases = [], target = {}) {
+  const quality = String(target?.quality || '');
+  const filename = String(target?.filename || '');
+  const exact = releases.findIndex(
+    (release) => String(release.filename || '') === filename && String(release.quality || '') === quality,
+  );
+  if (exact >= 0) return exact;
+  const byQuality = releases.findIndex((release) => String(release.quality || '') === quality);
+  return byQuality >= 0 ? byQuality : 0;
+}
+
 export const STATUS_LABELS = {
   idle: 'Waiting',
   loading: 'Checking',
@@ -39,7 +171,11 @@ export function scoreRelease(release, fallbackProvider) {
   const hasMirror = (release.mirrors?.length || 0) > 0 ? 0 : 10;
   const size = release.size_bytes ? 0 : 1;
   const directBonus = release.mirrors?.some((mirror) => mirror.direct_file) ? -1 : 0;
-  return providerScore * 100 + qualityScore(release.quality) * 10 + hasMirror + size + directBonus;
+  // HEVC/.mkv releases are pushed behind playable ones so the browser does not
+  // burn through them (and the user's patience) before a working link starts.
+  const reason = unsupportedReason(release);
+  const unsupportedPenalty = reason === 'container' ? 60 : reason === 'codec' ? 50 : 0;
+  return providerScore * 100 + qualityScore(release.quality) * 10 + hasMirror + size + directBonus + unsupportedPenalty;
 }
 
 /** Best playable links first, keeping the API's own index for /api/play. */
@@ -71,6 +207,12 @@ export function buildAttempts(releases = [], firstIndex = 0) {
     }
   }
   return attempts;
+}
+
+/** Drops the cached stream list for one server (its links/session expired). */
+export async function refreshServerStreams({ provider, item, title, season, episode, isSeries, cache, signal }) {
+  delete cache[provider];
+  return resolveServerStreams({ provider, item, title, season, episode, isSeries, cache, signal });
 }
 
 /** Servers to try after `provider`, wrapping so every server still gets a turn. */
@@ -172,12 +314,7 @@ function createPlaybackMonitor(video, signal) {
     }, STABLE_PLAYBACK_MS);
   };
   const onVideoError = () => {
-    const code = video.error?.code;
-    const message = video.error?.message || '';
-    finish({
-      played: false,
-      error: new Error(code ? `Playback error ${code}: ${message}`.trim() : 'The browser could not play this stream.'),
-    });
+    finish({ played: false, error: describeMediaError(video) });
   };
   const onAbort = () => finish({ played: false, cancelled: true });
 
@@ -275,7 +412,7 @@ export async function openStream({ playback, video, signal, onTrack }) {
             detail.severity === 2;
           if (!critical) return;
           if (video.readyState >= 3 && !video.paused && video.currentTime > 1) return;
-          monitor.fail(new Error(detail?.message || `Stream error ${detail?.code || ''}`.trim()));
+          monitor.fail(describeShakaError(detail));
         };
         player.addEventListener('error', onError);
         monitor.promise.then(() => player.removeEventListener('error', onError)).catch(() => {});
@@ -322,13 +459,15 @@ export async function autoPlay({ item, title, order, season, episode, isSeries, 
   const setHeader = hooks.onHeader || (() => {});
   const setStreams = hooks.onStreams || (() => {});
   let lastError = '';
+  let lastKind = '';
+  let codecSeen = false;
 
   for (const provider of order) {
     if (signal.aborted) return { cancelled: true };
     setServerStatus(provider, 'loading');
     setStatus(`Checking ${providerLabel(provider)} for “${title}”…`, true);
 
-    const entry = await resolveServerStreams({ provider, item, title, season, episode, isSeries, cache, signal });
+    let entry = await resolveServerStreams({ provider, item, title, season, episode, isSeries, cache, signal });
     if (signal.aborted) return { cancelled: true };
     if (!entry) {
       setServerStatus(provider, 'empty');
@@ -340,11 +479,18 @@ export async function autoPlay({ item, title, order, season, episode, isSeries, 
       provider === order[0] ? Math.min(Math.max(Number(startRelease) || 0, 0), entry.releases.length - 1) : 0;
     setStreams(entry, firstIndex);
 
-    const attempts = buildAttempts(entry.releases, firstIndex);
     const sourceName = providerLabel(provider);
+    let attempts = buildAttempts(entry.releases, firstIndex);
+    let cursor = 0;
     let attempt = 0;
-    for (const { releaseIndex, mirrorIndex } of attempts) {
+    // One stream-list refresh per server: when the stream set expires (60 min
+    // TTL) or a signed CDN cookie dies mid-run, a fresh /api/streams usually plays.
+    let refreshed = false;
+
+    while (cursor < attempts.length) {
       if (signal.aborted) return { cancelled: true };
+      const { releaseIndex, mirrorIndex } = attempts[cursor];
+      cursor += 1;
       const release = entry.releases[releaseIndex];
       const quality = String(release.quality || 'AUTO').toUpperCase();
       attempt += 1;
@@ -356,6 +502,7 @@ export async function autoPlay({ item, title, order, season, episode, isSeries, 
       await closeActivePlayer(video, hooks.currentPlayer?.());
       if (signal.aborted) return { cancelled: true };
 
+      let failure = null;
       try {
         const playback = await api.play(
           { streamSetId: entry.streamSetId, releaseIndex: release.serverIndex ?? releaseIndex, mirrorIndex },
@@ -375,18 +522,40 @@ export async function autoPlay({ item, title, order, season, episode, isSeries, 
           return { played: true, provider, release, entry, playback };
         }
         if (result.cancelled || signal.aborted) return { cancelled: true };
-        lastError = result.error?.message || 'This stream could not be started.';
+        failure = result.error || new Error('This stream could not be started.');
       } catch (error) {
         if (signal.aborted || error?.name === 'AbortError') return { cancelled: true };
-        lastError = error.message || 'This stream could not be prepared.';
+        failure = error;
       }
+
+      lastError = failure?.message || 'This stream could not be started.';
+      lastKind = failure?.kind || '';
+      if (lastKind === ERROR_KINDS.codec) codecSeen = true;
+
+      if (!refreshed && isExpiredLinkError(failure)) {
+        refreshed = true;
+        setStatus(`${sourceName} links expired — getting fresh links…`, true);
+        const fresh = await refreshServerStreams({ provider, item, title, season, episode, isSeries, cache, signal });
+        if (signal.aborted) return { cancelled: true };
+        if (fresh) {
+          entry = fresh;
+          hooks.onEntry?.(entry);
+          const target = matchReleaseIndex(entry.releases, release);
+          attempts = buildAttempts(entry.releases, target);
+          setStreams(entry, target);
+          cursor = 0;
+          attempt = 0;
+          continue;
+        }
+      }
+
       await new Promise((resolve) => window.setTimeout(resolve, 200));
     }
     setServerStatus(provider, 'failed');
     setStatus(`${sourceName} has no working link. Moving to the next server…`, true);
   }
 
-  return { played: false, error: lastError, order };
+  return { played: false, error: lastError, kind: lastKind, codecSeen, order };
 }
 
 /** Downloads one release/mirror as a file when the link supports it. */

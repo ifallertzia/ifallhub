@@ -176,7 +176,7 @@ karega).
 | `GET /api/health` | engine status |
 | `GET /api/providers`, `/api/collections`, `/api/discover`, `/api/search`, `/api/suggest` | catalog |
 | `GET /api/details`, `/api/related`, `/api/meta` | title data |
-| `GET /api/streams?provider=…&id=…&season=&episode=` | release list (20 min TTL stream set) |
+| `GET /api/streams?provider=…&id=…&season=&episode=` | release list (60 min TTL stream set) |
 | `POST /api/play` | session banao → `playback_url` deta hai |
 | `GET /api/media/<token>/<scheme>/<host>/<path>` | **same-origin media proxy** (manifest + segments + ranges) |
 | `GET/POST /api/library*`, `GET /api/library/events` | watchlist/progress/ratings + SSE |
@@ -201,16 +201,16 @@ ki allow-list me add ho jaate hain.
 
 | # | Cause | Kaise confirm karein | Fix |
 | :- | :--- | :--- | :--- |
-| 1 | **HEVC / H.265 DASH** (sabse common) — CDN path me `_h265_`, MPD me `codecs="hvc1…/hev1…"` | `ffprobe` chalao, ya script ke "codec verdict" line dekho; Shaka error **4032 CONTENT_UNSUPPORTED_BY_BROWSER** | Browser me H.264 (`avc1`) release chuno, ya title TUI/`mpv` me play karo |
-| 2 | **`.mkv` / x265 direct file** (4KHDHub mirrors) | `<video>` error code **4** (SRC_NOT_SUPPORTED), par `mpv` same URL chala deta hai | `mpv`/VLC use karo, ya `.mp4` H.264 release |
-| 3 | **Expired signed cookie** — `Edge-Cache-Cookie … :t=<unix>` purana ho gaya | manifest GET par **403**; cookie ka `t=` compare karo | Stream list refresh karo (naya `signCookie`), phir dobara play |
+| 1 | **HEVC / H.265 DASH** (sabse common) — CDN path me `_h265_`, MPD me `codecs="hvc1…/hev1…"` | `ffprobe` chalao, ya script ke "codec verdict" line dekho; Shaka error **4032 CONTENT_UNSUPPORTED_BY_BROWSER** | **Fixed:** web player HEVC/H.265 releases ko ranking me peeche bhejta hai (H.264 pehle try hota hai), stream list me `⚠ H.265 browser me nahi` badge dikhata hai, aur fail hone par exact reason + "mpv/VLC me chalega" hint deta hai |
+| 2 | **`.mkv` / x265 direct file** (4KHDHub mirrors) | `<video>` error code **4** (SRC_NOT_SUPPORTED), par `mpv` same URL chala deta hai | **Fixed:** `.mkv`/`.avi` releases ranking me sabse peeche, list me `⚠ container browser me nahi` badge, aur error message me download/mpv suggestion |
+| 3 | **Expired signed cookie** — `Edge-Cache-Cookie … :t=<unix>` purana ho gaya | manifest GET par **403**; cookie ka `t=` compare karo | **Fixed:** browser ko HTTP 403/410 dikhe to engine khud `/api/streams` dobara laata hai, wahi release match karke naye cookie ke saath retry karta hai (per server ek refresh) |
 | 4 | **Referer/UA strip ho gaya** — CDN sirf `Referer: https://sportslive.wine` ke saath deta hai | manifest 403 jabki browser DevTools me headers na dikhein | Web proxy aur player me headers forward hone chahiye (code already karta hai; reverse-proxy/CDN ke beech me mat girao) |
 | 5 | **Segment host allow-list me nahi** — audio/video alag CDN par | proxy `403 "Media host is not part of this playback session"` | Manifest ke andar saare hosts allow-list me add hote hain; agar naya host HTML/redirect ke andar chhupa ho to fail hota hai — logs dekh ke resolve karo |
-| 6 | **Stream set expire (20 min)** | `410 Stream list expired. Refresh the stream list and try again.` | Page refresh → naya `/api/streams` |
+| 6 | **Stream set expire** (ab 60 min TTL, pehle 20 min) | `410 Stream list expired. Refresh the stream list and try again.` | **Fixed:** TTL 60 min + browser 410 par khud refresh karke retry karta hai; manually refresh ki zaroorat nahi |
 | 7 | **Playback session expire / evict (6 h ya 512 sessions)** | beech playback me `404 Playback session expired` | Dobara play, ya `MAX_PLAYBACK_SESSIONS`/TTL badhao |
-| 8 | **Start timeout** — engine sirf 6.5 s wait karta hai, phir 1.2 s stability | overlay: "The stream did not start before timeout" | Slow CDN/pehla segment late — next release try hota hai; server region/network check karo |
+| 8 | **Start timeout** — engine sirf 6.5 s wait karta hai, phir 1.2 s stability | overlay: "The stream did not start before timeout" | Slow CDN/pehla segment late — next release try hota hai; server region/network check karo (message me reason ab overlay/LIVE status me dikhta hai) |
 | 9 | **BDIX/private-IP ya `http://` source** | `172.16.*` / `new.circleftp.net:5000` unreachable, ya mixed-content block | Sirf BDIX ISP network me chalta hai; public deploy ke liye MovieBox/4KHDHub use karo |
-| 10 | **Rate limit 429** — edge `MOVIEBOX_WEB_MEDIA_RATE_LIMIT` (default 1200/min, docs me 600) aur `MOVIEBOX_WEB_RATE_LIMIT` (300/min), Rust API `MOVIEBOX_WEB_API_RATE_PER_MIN` (120/min) | DevTools me `/api/media/...` par 429 | Limits badhao ya `0` karo; lambi DASH movie bahut segment requests karti hai |
+| 10 | **Rate limit 429** — `MOVIEBOX_WEB_MEDIA_RATE_LIMIT` (default 1200/min), `MOVIEBOX_WEB_RATE_LIMIT` (300/min), Rust API `MOVIEBOX_WEB_API_RATE_PER_MIN` (300/min) | DevTools me `/api/media/...` par 429 | Limits badhao ya `0` karo; lambi DASH movie bahut segment requests karti hai |
 | 11 | **API host pool exhaust / ISP block** | search/streams hi fail, `All hosts exhausted` | Alag network/VPN try karo; host pool update chahiye ho sakta hai |
 | 12 | **Notice/deprecation placeholder video** — CDN `notice.mp4` bhej raha hai | "video chalti hai par galat content" | Code ise filter karta hai; agar phir bhi aaye to nayi notice URL add karni padegi |
 | 13 | **Idle timeouts** — proxy 60 s chunk idle, web proxy 90 s body idle, manifest 20 s | Lambe pause ke baad stream band | Normal behaviour; pause lamba ho to dobara play |
@@ -226,6 +226,32 @@ ki allow-list me add ho jaate hain.
 * Kuch bhi reachable nahi → **network/ISP/host rotate**.
 
 ---
+
+## 3.1 Web player ke behaviour fixes (code)
+
+`web/src/player/engine.js` + `web/src/views/watch.js` me ye behaviour ab built-in hai:
+
+- **Codec-aware ranking** — `unsupportedReason()` HEVC/H.265 (`hevc`, `h265`, `x265`, `hvc1`, `hev1`)
+  aur unsafe containers (`.mkv`, `.avi`, `.wmv`, `.flv`, `.m2ts`, `.vob`) ko detect karta hai;
+  `scoreRelease()` un releases ko +50/+60 penalty deta hai, isliye playable H.264 `.mp4` pehle try
+  hota hai (release hataayi nahi jaati — download aur manual play ke liye list me rehti hai).
+- **Asli reason UI me** — Shaka error codes (`4032` unsupported codec, `1001/1002/1003`
+  HTTP/network with status + host) aur `<video>` MediaError (2 network, 3 decode, 4
+  unsupported) human messages me convert hote hain; overlay/status me exact HTTP status aur
+  codec hint aata hai.
+- **Expired link auto-recovery** — HTTP 403 (signed cookie khatam) ya 410 (stream set TTL)
+  mile to engine us server ka cache clear karke `/api/streams` dobara fetch karta hai, wahi
+  release (`matchReleaseIndex`) uthata hai aur fresh cookie ke saath retry karta hai — server
+  per ek baar.
+- **Badge** — stream list me unplayable releases par `⚠ H.265 browser me nahi` /
+  `⚠ container browser me nahi` dikhta hai, taaki user aankh band karke click na kare.
+
+Rust side (`src/web_api.rs`):
+
+- Stream set TTL **20 min → 60 min**.
+- DASH manifest me **protocol-relative URLs** (`//cdn/seg/$Number$.m4s`) bhi ab `/api/media/...`
+  se jaate hain, aur unka host media-host allow-list me register hota hai (pehle browser seedha
+  CDN hit karta tha → CORS/Referer fail ya proxy 403).
 
 ## 4. Manual verification commands
 
@@ -266,4 +292,5 @@ Rust side logs: `MOVIEBOX_LOG=debug cargo run -- --web-api`.
 * `src/providers/moviebox/adapt.rs` — `signCookie` decode, manifest URL, notice filter, release list.
 * `src/web_api.rs` — `/api/play` + `/api/media` proxy, TTLs, host allow-list.
 * `src/proxy.rs` — TUI loopback proxy (headers, DASH ranges, watchdog).
-* `web/src/player/engine.js` — browser player, server rotation, error/timeout handling.
+* `web/src/player/engine.js` — browser player, server rotation, codec ranking, error decoding,
+  expired-link auto-refresh, timeouts (`web/tests/engine.test.js` inhe cover karta hai).

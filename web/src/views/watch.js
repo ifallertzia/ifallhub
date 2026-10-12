@@ -23,7 +23,11 @@ import {
   downloadRelease,
   openStream,
   rotationAfter,
+  unsupportedReason,
 } from '../player/engine.js';
+
+const CODEC_HINT =
+  'Ye link H.265/HEVC ya .mkv me hai — browser ise play nahi kar sakta (mpv/VLC me chalega). Neeche koi doosra release chuno ya TUI use karo.';
 
 const state = {
   provider: 'moviebox',
@@ -304,7 +308,7 @@ async function startRotation({ startAfter, startRelease = 0 } = {}) {
   if (runId !== state.runId) return;
   if (!result.played && !result.cancelled) {
     showOverlay(
-      `No server could start this title (${state.order.map(providerLabel).join(' → ')}).${result.error ? ` Last error: ${displayUiText(result.error)}` : ''}`,
+      `No server could start this title (${state.order.map(providerLabel).join(' → ')}).${result.error ? ` Last error: ${displayUiText(result.error)}` : ''}${result.codecSeen ? ` ${CODEC_HINT}` : ''}`,
     );
     setStatus('No link could start. Try the next server or download a link below.', false);
   }
@@ -325,6 +329,7 @@ async function playManual(releaseIndex) {
   setStatus(`Starting ${providerLabel(state.entry.provider)} · ${release.quality || 'AUTO'}…`, true);
 
   const attempts = buildAttempts(state.entry.releases, releaseIndex);
+  let lastFailure = null;
   for (const attempt of attempts) {
     if (controller.signal.aborted || runId !== state.runId) return;
     const target = state.entry.releases[attempt.releaseIndex];
@@ -354,11 +359,15 @@ async function playManual(releaseIndex) {
         return;
       }
       if (result.cancelled) return;
+      lastFailure = result.error || null;
     } catch (error) {
       if (error?.name === 'AbortError') return;
+      lastFailure = error;
     }
   }
-  showOverlay('This link could not be started. Try another link or the next server.');
+  showOverlay(
+    `This link could not be started.${lastFailure ? ` ${displayUiText(lastFailure.message)}` : ''} Try another link or the next server.${lastFailure?.kind === 'codec' ? ` ${CODEC_HINT}` : ''}`,
+  );
 }
 
 // --- Progress tracking -----------------------------------------------------
@@ -464,13 +473,17 @@ function paintStreams() {
   list.innerHTML = state.entry.releases
     .map((release, index) => {
       const mirrors = release.mirrors?.length ? release.mirrors : [{ label: '' }];
+      const reason = unsupportedReason(release);
+      const warning = reason
+        ? ` <span class="stream-warning" title="Browser ise decode nahi kar sakta; download ya mpv/VLC me chalega.">⚠ ${reason === 'container' ? 'container browser me nahi' : 'H.265 browser me nahi'}</span>`
+        : '';
       return `
         <div class="stream-row ${index === state.selected ? 'is-active' : ''}">
           <button class="stream-option" type="button" data-play-release="${index}">
             <span class="stream-quality">${escapeHtml(String(release.quality || 'AUTO'))}</span>
             <span class="stream-main">
               <span class="stream-name">${escapeHtml(displayUiText(release.filename || 'Stream'))}</span>
-              <span class="stream-sub">${escapeHtml(providerLabel(release.provider))}${release.codec ? ` · ${escapeHtml(release.codec)}` : ''}</span>
+              <span class="stream-sub">${escapeHtml(providerLabel(release.provider))}${release.codec ? ` · ${escapeHtml(release.codec)}` : ''}${warning}</span>
             </span>
             <span class="stream-check">${index === state.selected ? '✓' : ''}</span>
           </button>

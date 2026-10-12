@@ -60,7 +60,8 @@ You need Node.js/npm and the Rust toolchain already required by MovieBox-Tui.
 
 ```sh
 cd web
-npm test    # node:test suites for the ranking/format helpers
+npm test    # node:test suites: ranking/format helpers + the playback engine
+            # (codec ranking, Shaka/MediaError decoding, expired-link refresh)
 npm run build
 ```
 

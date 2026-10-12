@@ -313,6 +313,7 @@ h1, h2, h3, p { margin: 0; }
 .stream-main { display: grid; gap: 3px; min-width: 0; flex: 1; }
 .stream-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
 .stream-sub { display: flex; align-items: center; color: var(--dim); font-size: 10.5px; }
+.stream-warning { margin-left: 6px; color: var(--gold); font-size: 10px; white-space: nowrap; }
 .stream-source { color: var(--muted); font-family: var(--mono); font-size: 9.5px; }
 .stream-check { color: var(--accent-light); }
 .stream-downloads { display: flex; flex-wrap: wrap; gap: 7px; }
