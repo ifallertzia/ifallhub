@@ -571,15 +571,37 @@ pub fn is_deprecation_notice_url(url: &str) -> bool {
 }
 
 fn to_dash_mpd(url_str: &str) -> Option<String> {
+    to_manifest_url(url_str)
+}
+
+fn to_manifest_url(url_str: &str) -> Option<String> {
     let base = url_str.trim_end_matches('*').trim_end_matches('/');
-    if !base.is_empty()
-        && (base.starts_with("http://") || base.starts_with("https://"))
-        && base.contains("/dash/")
-    {
-        Some(format!("{base}/index.mpd"))
-    } else {
-        None
+    if base.is_empty() || !(base.starts_with("http://") || base.starts_with("https://")) {
+        return None;
     }
+    // Already a manifest file
+    if base.ends_with(".mpd") || base.ends_with(".m3u8") || base.ends_with(".m3u") {
+        return Some(base.to_string());
+    }
+    if base.contains("/dash/") {
+        return Some(format!("{base}/index.mpd"));
+    }
+    if base.contains("/hls/") {
+        // HLS manifests are typically index.m3u8 inside the hls folder
+        return Some(format!("{base}/index.m3u8"));
+    }
+    // Fallback: if url looks like a cdn path with dash or hls segment, try to infer
+    // For backward compatibility, also accept any url that has at least 2 path segments after domain
+    // and treat it as potential dash if it doesn't explicitly say hls
+    if base.contains("hakunaymatata.com") || base.contains("aoneroom.com") || base.contains("sacdn") || base.contains("sbcdn") {
+        // Default to dash for legacy cdn urls that don't have explicit marker but are from known cdns
+        // However if url contains \"hls\" anywhere, treat as hls
+        if base.to_ascii_lowercase().contains("hls") {
+            return Some(format!("{base}/index.m3u8"));
+        }
+        return Some(format!("{base}/index.mpd"));
+    }
+    None
 }
 
 fn decode_b64_padded(mut s: String) -> Option<Vec<u8>> {
@@ -1105,7 +1127,10 @@ mod tests {
             );
         }
         let hls_cookie = "Edge-Cache-Cookie=urlprefix=aHR0cHM6Ly9zYmNkbjMuaGFrdW5heW1hdGF0YS5jb20vaGxzLzUyODM0MjAzNzkzODAzMzU1NzYtMS0xLTcyMC05NDYv:sign=9d668fe770e7d41d067f80422544d47e:t=1791308037";
-        assert_eq!(resolve_dash_manifest_from_policy(hls_cookie), None);
+        assert_eq!(
+            resolve_dash_manifest_from_policy(hls_cookie).as_deref(),
+            Some("https://sbcdn3.hakunaymatata.com/hls/5283420379380335576-1-1-720-946/index.m3u8")
+        );
     }
 
     #[test]
@@ -1169,7 +1194,7 @@ mod tests {
         );
     }
     #[test]
-    fn test_hls_signed_policy_rejected_as_dash_manifest() {
+    fn test_hls_signed_policy_now_supported() {
         let payload = json!({
             "code": 0,
             "data": {
@@ -1190,7 +1215,12 @@ mod tests {
             }
         });
         let releases = moviebox_play_info_json_to_releases(&payload, 1, 1, "TestAgent/1.0");
-        assert!(releases.is_empty());
+        // HLS should now be supported, producing a release with m3u8 url
+        assert_eq!(releases.len(), 1);
+        assert_eq!(
+            releases[0].direct_url(),
+            Some("https://sbcdn3.hakunaymatata.com/hls/404231799767024856-1-1-720-974/index.m3u8")
+        );
     }
 
     #[test]

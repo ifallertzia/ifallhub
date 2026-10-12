@@ -53,11 +53,11 @@ impl Default for MovieBoxClient {
 impl MovieBoxClient {
     pub fn new() -> Self {
         let client = crate::net::http_client_builder()
-            .timeout(std::time::Duration::from_secs(12))
-            .connect_timeout(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(20))
+            .connect_timeout(std::time::Duration::from_secs(5))
             .tcp_keepalive(std::time::Duration::from_secs(30))
             .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .pool_max_idle_per_host(4)
+            .pool_max_idle_per_host(32)
             .build()
             .expect("moviebox http client");
 

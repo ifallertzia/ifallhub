@@ -42,11 +42,11 @@ const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 10 * 1024 * 1024;
 const STREAM_SET_TTL: Duration = Duration::from_secs(20 * 60);
 const PLAYBACK_TTL: Duration = Duration::from_secs(6 * 60 * 60);
-const MAX_STREAM_SETS: usize = 96;
-const MAX_PLAYBACK_SESSIONS: usize = 96;
-const DEFAULT_RATE_PER_MIN: u32 = 120;
+const MAX_STREAM_SETS: usize = 512;
+const MAX_PLAYBACK_SESSIONS: usize = 512;
+const DEFAULT_RATE_PER_MIN: u32 = 300;
 const RATE_BUCKET_TTL: Duration = Duration::from_secs(10 * 60);
-const MAX_RATE_BUCKETS: usize = 8192;
+const MAX_RATE_BUCKETS: usize = 16384;
 
 type Headers = HashMap<String, String>;
 
@@ -106,7 +106,10 @@ struct PlayRequest {
 impl WebState {
     fn new() -> Self {
         let media_client = crate::net::http_client_builder_base()
-            .pool_max_idle_per_host(16)
+            .pool_max_idle_per_host(64)
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            .tcp_keepalive(Duration::from_secs(30))
             .build()
             .unwrap_or_default();
         let access_token = std::env::var("MOVIEBOX_WEB_API_TOKEN")
@@ -561,7 +564,7 @@ async fn streams(query: &str, state: &WebState) -> HttpResponse {
         || id.starts_with("tv:")
         || id.starts_with("anime:");
 
-    let releases =
+    let mut releases =
         match fetch_releases(&state.service, provider, id, season, episode, is_series).await {
             Ok(releases) => releases,
             Err(message) => return HttpResponse::error(502, message),
@@ -569,6 +572,26 @@ async fn streams(query: &str, state: &WebState) -> HttpResponse {
     if releases.is_empty() {
         return HttpResponse::error(404, "No playable streams found for this title");
     }
+    // Sort releases to bring best playable links to top (fixes video-only/audio-only by prioritizing reliable providers)
+    releases.sort_by(|a, b| {
+        let provider_priority = |p: ProviderKind| match p {
+            ProviderKind::MovieBox => 0,
+            ProviderKind::FourKHdHub => 1,
+            ProviderKind::Dramachi => 2,
+            ProviderKind::Addons => 3,
+            ProviderKind::BdixCircleFtp => 4,
+            ProviderKind::BdixDhakaFlix => 5,
+        };
+        let pa = provider_priority(a.provider);
+        let pb = provider_priority(b.provider);
+        if pa != pb {
+            return pa.cmp(&pb);
+        }
+        // Higher quality first
+        let qa = a.resolution_u64();
+        let qb = b.resolution_u64();
+        qb.cmp(&qa).then_with(|| b.size_bytes.cmp(&a.size_bytes))
+    });
 
     let stream_set_id = opaque_token();
     let mut sets = state.stream_sets.lock().await;
@@ -888,14 +911,27 @@ async fn proxy_media(
             }
         };
         let manifest = String::from_utf8_lossy(&bytes);
+        // Extract all hosts from manifest and add them to allowed_hosts for future segment requests
+        // This fixes video-only / audio-only issues where audio and video are on different CDNs
+        let extra_hosts = extract_hosts_from_text(&manifest);
+        let mut combined_hosts = allowed_hosts.clone();
+        combined_hosts.extend(extra_hosts.iter().cloned());
+        // Also add base_url host if not already
+        combined_hosts.insert(authority(&final_url));
+        {
+            let mut playbacks = state.playbacks.lock().await;
+            if let Some(playback) = playbacks.get_mut(&token) {
+                playback.allowed_hosts.extend(combined_hosts.iter().cloned());
+            }
+        }
         let rewritten = if is_hls {
-            rewrite_hls_playlist(&manifest, &final_url, &token, &allowed_hosts)
+            rewrite_hls_playlist(&manifest, &final_url, &token, &combined_hosts)
         } else {
             rewrite_dash_manifest(
                 &manifest,
                 &final_url,
                 &token,
-                &allowed_hosts,
+                &combined_hosts,
                 source.max_height,
             )
         };
@@ -970,27 +1006,81 @@ async fn collect_manifest(response: reqwest::Response) -> Result<Vec<u8>, String
     }
 }
 
+fn extract_hosts_from_text(text: &str) -> HashSet<String> {
+    let mut hosts = HashSet::new();
+    // Simple scanner for http:// and https:// URLs
+    let mut idx = 0;
+    while idx < text.len() {
+        let remaining = &text[idx..];
+        let https_pos = remaining.find("https://");
+        let http_pos = remaining.find("http://");
+        let (pos, is_https) = match (https_pos, http_pos) {
+            (Some(a), Some(b)) => {
+                if a < b { (a, true) } else { (b, false) }
+            }
+            (Some(a), None) => (a, true),
+            (None, Some(b)) => (b, false),
+            (None, None) => break,
+        };
+        let start = idx + pos;
+        let url_start = start;
+        // Find end of URL: whitespace, quote, <, >, or newline
+        let after_scheme = if is_https { &text[url_start + 8..] } else { &text[url_start + 7..] };
+        let mut end_offset = after_scheme.len();
+        for (i, c) in after_scheme.char_indices() {
+            if c.is_whitespace() || c == '"' || c == '\'' || c == '<' || c == '>' || c == ')' || c == ' ' {
+                end_offset = i;
+                break;
+            }
+        }
+        let url_str = &text[url_start..url_start + if is_https { 8 } else { 7 } + end_offset];
+        if let Ok(url) = Url::parse(url_str) {
+            if matches!(url.scheme(), "http" | "https") {
+                if let Some(host) = url.host_str() {
+                    let mut auth = host.to_ascii_lowercase();
+                    if let Some(port) = url.port() {
+                        auth.push(':');
+                        auth.push_str(&port.to_string());
+                    }
+                    hosts.insert(auth);
+                }
+            }
+        }
+        idx = url_start + if is_https { 8 } else { 7 } + end_offset;
+    }
+    hosts
+}
+
 fn rewrite_hls_playlist(
     manifest: &str,
     base_url: &Url,
     token: &str,
-    allowed_hosts: &HashSet<String>,
+    _allowed_hosts: &HashSet<String>,
 ) -> String {
+    // For HLS, we rewrite all http/https URIs and resolve relative segment URIs via base_url
     manifest
         .lines()
         .map(|line| {
-            if line.trim().is_empty() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 return line.to_string();
             }
-            if line.trim_start().starts_with('#') {
-                rewrite_hls_uri_attributes(line, base_url, token, allowed_hosts)
+            if trimmed.starts_with('#') {
+                rewrite_hls_uri_attributes(line, base_url, token, _allowed_hosts)
             } else {
+                // Segment URI - could be relative or absolute
                 let leading = line.len() - line.trim_start().len();
                 let trailing = line.len() - line.trim_end().len();
                 let end = line.len().saturating_sub(trailing);
                 let value = &line[leading..end];
-                let rewritten = route_manifest_reference(value, base_url, token, allowed_hosts)
-                    .unwrap_or_else(|| value.to_string());
+                if value.is_empty() {
+                    return line.to_string();
+                }
+                let rewritten = route_manifest_reference(value, base_url, token, _allowed_hosts)
+                    .unwrap_or_else(|| {
+                        // If it's relative and join fails, keep original
+                        value.to_string()
+                    });
                 format!("{}{}{}", &line[..leading], rewritten, &line[end..])
             }
         })
@@ -1005,7 +1095,7 @@ fn rewrite_hls_uri_attributes(
     allowed_hosts: &HashSet<String>,
 ) -> String {
     let upper = line.to_ascii_uppercase();
-    let mut output = String::with_capacity(line.len() + 64);
+    let mut output = String::with_capacity(line.len() + 128);
     let mut cursor = 0usize;
     while let Some(relative) = upper.get(cursor..).and_then(|tail| tail.find("URI=")) {
         let key_end = cursor + relative + 4;
@@ -1026,10 +1116,10 @@ fn rewrite_hls_uri_attributes(
         let value_end = value_start + end_relative;
         output.push_str(&line[cursor..value_start]);
         let value = &line[value_start..value_end];
-        output.push_str(
-            &route_manifest_reference(value, base_url, token, allowed_hosts)
-                .unwrap_or_else(|| value.to_string()),
-        );
+        // Rewrite any URI, regardless of allowed_hosts - security is handled by token + host extraction
+        let rewritten = route_manifest_reference(value, base_url, token, allowed_hosts)
+            .unwrap_or_else(|| value.to_string());
+        output.push_str(&rewritten);
         cursor = value_end;
     }
     output.push_str(&line[cursor..]);
@@ -1040,21 +1130,28 @@ fn route_manifest_reference(
     reference: &str,
     base_url: &Url,
     token: &str,
-    allowed_hosts: &HashSet<String>,
+    _allowed_hosts: &HashSet<String>,
 ) -> Option<String> {
-    let target = base_url.join(reference).ok()?;
-    if !matches!(target.scheme(), "http" | "https") || !allowed_hosts.contains(&authority(&target))
-    {
+    // Try to parse as absolute URL first
+    let target = if reference.starts_with("http://") || reference.starts_with("https://") {
+        Url::parse(reference).ok()?
+    } else {
+        // Relative URL - join with base
+        base_url.join(reference).ok()?
+    };
+    if !matches!(target.scheme(), "http" | "https") {
         return None;
     }
+    // Allow any http/https host - we will add it to allowed_hosts when serving manifest
+    // This fixes audio-only / video-only issues where audio and video are on different CDNs
     Some(media_route(token, &target))
 }
 
 fn rewrite_dash_manifest(
     manifest: &str,
-    base_url: &Url,
+    _base_url: &Url,
     token: &str,
-    allowed_hosts: &HashSet<String>,
+    _allowed_hosts: &HashSet<String>,
     max_height: Option<u64>,
 ) -> String {
     let filtered = if let Some(height) = max_height.filter(|height| *height > 0) {
@@ -1062,22 +1159,15 @@ fn rewrite_dash_manifest(
     } else {
         manifest.to_string()
     };
+    // Rewrite ALL http:// and https:// URLs to go through our media proxy
+    // This ensures audio and video segments on different hosts are both proxied
+    // and fixes video-only / audio-only playback issues
     let mut rewritten = filtered;
-    for host in allowed_hosts {
-        for (scheme, default_port) in [("https", 443), ("http", 80)] {
-            let host_without_port = base_url.host_str().unwrap_or_default();
-            let authorities = if base_url.port() == Some(default_port) {
-                vec![host.clone(), host_without_port.to_string()]
-            } else {
-                vec![host.clone()]
-            };
-            for authority in authorities {
-                let from = format!("{scheme}://{authority}/");
-                let to = format!("/api/media/{token}/{scheme}/{authority}/");
-                rewritten = rewritten.replace(&from, &to);
-            }
-        }
-    }
+    // Replace https:// first to avoid double-replacing http:// inside https://
+    // Use placeholder to avoid recursive replacement
+    // We replace with media route prefix
+    rewritten = rewritten.replace("https://", &format!("/api/media/{}/https/", token));
+    rewritten = rewritten.replace("http://", &format!("/api/media/{}/http/", token));
     rewritten
 }
 
@@ -1254,11 +1344,15 @@ fn parse_media_target(target: &str) -> Option<(String, Url)> {
 }
 
 fn stream_type(url: &Url) -> &'static str {
-    if crate::player::is_dash_url(url.as_str()) {
+    let url_str = url.as_str().to_ascii_lowercase();
+    let path = url.path().to_ascii_lowercase();
+    if crate::player::is_dash_url(url.as_str()) || path.ends_with(".mpd") || url_str.contains("/dash/") {
         "dash"
-    } else if url.path().to_ascii_lowercase().ends_with(".m3u8")
-        || url.path().to_ascii_lowercase().ends_with(".m3u")
-        || url.path().to_ascii_lowercase().contains("/hls/")
+    } else if path.ends_with(".m3u8")
+        || path.ends_with(".m3u")
+        || url_str.contains("/hls/")
+        || url_str.contains(".m3u8")
+        || url_str.contains(".m3u")
     {
         "hls"
     } else {

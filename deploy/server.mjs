@@ -38,8 +38,8 @@ const config = {
   apiTarget: process.env.MOVIEBOX_API_TARGET || 'http://127.0.0.1:8787',
   apiBin: process.env.MOVIEBOX_API_BIN || '',
   apiAddr: process.env.MOVIEBOX_API_ADDR || '127.0.0.1:8787',
-  rateLimit: parseRate(process.env.MOVIEBOX_WEB_RATE_LIMIT, 120),
-  mediaRateLimit: parseRate(process.env.MOVIEBOX_WEB_MEDIA_RATE_LIMIT, 600),
+  rateLimit: parseRate(process.env.MOVIEBOX_WEB_RATE_LIMIT, 300),
+  mediaRateLimit: parseRate(process.env.MOVIEBOX_WEB_MEDIA_RATE_LIMIT, 1200),
 };
 
 function parseRate(raw, fallback) {
@@ -245,7 +245,7 @@ const HOP_BY_HOP = new Set([
   'upgrade',
 ]);
 
-function proxyApi(req, res) {
+function proxyApi(req, res, retryCount = 0) {
   const upstreamHeaders = {};
   for (const [name, value] of Object.entries(req.headers)) {
     const lower = name.toLowerCase();
@@ -259,6 +259,7 @@ function proxyApi(req, res) {
   upstreamHeaders.connection = 'close';
 
   const isMedia = req.url.startsWith('/api/media/');
+  const maxRetries = isMedia ? 1 : 2;
   const request = http.request(
     {
       protocol: apiOrigin.protocol,
@@ -269,11 +270,20 @@ function proxyApi(req, res) {
       headers: upstreamHeaders,
     },
     (upstream) => {
+      // Retry on 502/503/504 for non-media requests
+      if (!isMedia && [502, 503, 504].includes(upstream.statusCode) && retryCount < maxRetries) {
+        log(`Retrying ${req.url} after ${upstream.statusCode} (attempt ${retryCount + 1})`);
+        upstream.resume();
+        setTimeout(() => proxyApi(req, res, retryCount + 1), 200 * (retryCount + 1));
+        return;
+      }
       const headers = {};
       for (const [name, value] of Object.entries(upstream.headers)) {
         if (!HOP_BY_HOP.has(name.toLowerCase())) headers[name] = value;
       }
       for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers[name] = value;
+      // Add CORS for media
+      if (isMedia) headers['Access-Control-Allow-Origin'] = '*';
       res.writeHead(upstream.statusCode || 502, headers);
       if (req.method === 'HEAD') {
         upstream.resume();
@@ -285,19 +295,24 @@ function proxyApi(req, res) {
   );
 
   // Media streams can legitimately be quiet for long stretches.
-  request.setTimeout(isMedia ? 300_000 : 60_000, () => {
+  // Increased timeouts to handle concurrent load
+  request.setTimeout(isMedia ? 300_000 : 90_000, () => {
     request.destroy(new Error('upstream timeout'));
   });
 
   request.on('error', (error) => {
-    log(`api proxy error for ${req.url}: ${error.message}`);
+    log(`api proxy error for ${req.url}: ${error.message} (retry ${retryCount})`);
+    if (retryCount < maxRetries && !isMedia) {
+      setTimeout(() => proxyApi(req, res, retryCount + 1), 300 * (retryCount + 1));
+      return;
+    }
     if (res.headersSent) return res.destroy();
     res.writeHead(502, {
       ...SECURITY_HEADERS,
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-store',
     });
-    res.end(JSON.stringify({ error: 'The MovieBox API is unavailable. Retry shortly.' }));
+    res.end(JSON.stringify({ error: 'The MovieBox API is temporarily busy. Please retry in a moment.' }));
   });
 
   if (req.method === 'HEAD' || req.method === 'GET') {

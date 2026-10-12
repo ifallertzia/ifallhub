@@ -93,7 +93,9 @@ impl DhakaFlixClient {
     pub fn new() -> Self {
         Self {
             client: crate::net::http_client_builder()
-                .timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(10))
+                .connect_timeout(Duration::from_secs(5))
+                .pool_max_idle_per_host(16)
                 .user_agent(crate::net::DEFAULT_BROWSER_USER_AGENT)
                 .build()
                 .expect("dhakaflix http client"),

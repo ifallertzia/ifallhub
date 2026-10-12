@@ -374,4 +374,20 @@ dialog::backdrop { background: rgba(3,3,6,.8); backdrop-filter: blur(10px); }
   .help-panel { padding: 27px 22px; }
   .help-panel h2 { max-width: 300px; font-size: 20px; }
 }
+/* New SPA sub-pages (not popups) */
+.page-container[hidden] { display: none !important; }
+.details-page-wrap { padding: 18px 0 0; }
+.back-button { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: rgba(255,255,255,.04); color: #d7d2da; font-size: 10px; cursor: pointer; transition: .18s ease; }
+.back-button:hover { border-color: rgba(255,255,255,.22); color: #fff; background: rgba(255,255,255,.07); }
+.back-button svg { width: 16px; height: 16px; }
+.player-page-wrap { width: min(100%, 1120px); margin: 0 auto; padding: 18px clamp(16px, 3vw, 32px) 24px; }
+.player-page-topbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+.player-page-title { flex: 1; min-width: 200px; }
+.player-page-title h2 { margin: 2px 0 0; font-size: 16px; font-family: Manrope, sans-serif; font-weight: 700; color: #f4f0f4; }
+.player-page-badges { display: flex; gap: 6px; }
+.player-page-info { margin-top: 14px; }
+.player-page-stream-list { margin-top: 12px; max-height: 320px; overflow-y: auto; padding-right: 4px; }
+.player-page-stream-list::-webkit-scrollbar { width: 6px; }
+.player-page-stream-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 3px; }
+
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
