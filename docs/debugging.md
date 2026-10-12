@@ -35,3 +35,8 @@ unavailable). With `MOVIEBOX_LOG=debug` you also get request context.
 - "no playable mirrors" on 4KHD → all mirrors were rejected by the preflight; the log
   lists each mirror and the reason.
 - TV mode "no channels" → playlists failed to load; the log names the failing source.
+- "Playback error" / video never starts → run
+  `python3 scripts/check_playback_links.py` (add `--url`/`--cookie` for a specific
+  stream): it replays the signed API calls, decodes the CloudFront `signCookie`,
+  and probes the DASH/HLS manifest plus one segment with the provider headers.
+  Causes and fixes are ranked in [`playback-links.md`](playback-links.md).

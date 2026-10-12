@@ -1090,39 +1090,78 @@ pub(crate) fn filter_dash_representations(manifest: &str, max_height: u64) -> St
     out
 }
 
+/// `reference` starts at a scheme; the returned slice is the URL up to the first
+/// character that cannot be part of an XML attribute value or text node.
+fn url_token(reference: &str) -> &str {
+    let mut end = reference.len();
+    for (offset, c) in reference.char_indices() {
+        if c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>') {
+            end = offset;
+            break;
+        }
+    }
+    &reference[..end]
+}
+
+/// True when the absolute URL at `reference` points at the stream host or the
+/// subtitle host -- the only hosts the loopback proxy is allowed to fetch.
+fn is_proxy_scoped_host(
+    reference: &str,
+    target_host: Option<&str>,
+    subtitle_host: Option<&str>,
+) -> bool {
+    let Some(host) = extract_host_authority(url_token(reference)) else {
+        return false;
+    };
+    target_host == Some(host.as_str()) || subtitle_host == Some(host.as_str())
+}
+
+fn proxy_route(proxy_port: u16, scheme: &str) -> String {
+    format!("http://127.0.0.1:{proxy_port}/{scheme}/")
+}
+
 fn rewrite_dash_manifest(
     manifest: &str,
     proxy_port: u16,
-    _target_host: Option<&str>,
+    target_host: Option<&str>,
     subtitle_url: Option<&str>,
     max_height: Option<u64>,
 ) -> String {
-    // Rewrite ALL https:// and http:// URLs to go through proxy
-    // This fixes video-only / audio-only issues where audio and video are on different CDNs
+    // Only the stream host (and the subtitle host) is routed through the loopback
+    // proxy, because those are the only authorities the proxy whitelist accepts.
+    // URLs on other hosts, relative references, and XML metadata such as
+    // xsi:schemaLocation are left untouched so the player can fetch or ignore
+    // them directly instead of receiving a proxy URL that would answer 403.
     let filtered_manifest = if let Some(limit) = max_height.filter(|&h| h > 0) {
         filter_dash_representations(manifest, limit)
     } else {
         manifest.to_string()
     };
+    let subtitle_host = subtitle_url.and_then(extract_host_authority);
+    let proxy_base = format!("http://127.0.0.1:{proxy_port}/");
     let mut rewritten = String::with_capacity(filtered_manifest.len() * 2);
     let mut last = 0;
     let bytes = filtered_manifest.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if filtered_manifest[i..].starts_with("https://") {
+        let reference = &filtered_manifest[i..];
+        let scheme_len = if reference.starts_with("https://") {
+            8
+        } else if reference.starts_with("http://") {
+            7
+        } else {
+            0
+        };
+        // Own proxy URLs are never rewritten twice; other hosts stay as they are.
+        let scoped = scheme_len > 0
+            && !reference.starts_with(proxy_base.as_str())
+            && is_proxy_scoped_host(reference, target_host, subtitle_host.as_deref());
+        if scoped {
+            // Drop the "://" so "https://" becomes "https" and "http://" becomes "http".
+            let scheme = &filtered_manifest[i..i + scheme_len - 3];
             rewritten.push_str(&filtered_manifest[last..i]);
-            rewritten.push_str(&format!("http://127.0.0.1:{proxy_port}/https/"));
-            i += 8;
-            last = i;
-        } else if filtered_manifest[i..].starts_with("http://") {
-            // Check if this is our own proxy URL (http://127.0.0.1:port/) - don't rewrite it again
-            if filtered_manifest[i..].starts_with(&format!("http://127.0.0.1:{proxy_port}/")) {
-                i += 1;
-                continue;
-            }
-            rewritten.push_str(&filtered_manifest[last..i]);
-            rewritten.push_str(&format!("http://127.0.0.1:{proxy_port}/http/"));
-            i += 7;
+            rewritten.push_str(&proxy_route(proxy_port, scheme));
+            i += scheme_len;
             last = i;
         } else {
             i += 1;

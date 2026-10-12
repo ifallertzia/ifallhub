@@ -44,7 +44,10 @@ const MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
 const MAX_HEADERS: usize = 64;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 10 * 1024 * 1024;
-const STREAM_SET_TTL: Duration = Duration::from_secs(20 * 60);
+// Stream sets hold server-side stream URLs and mirrors, but the player may sit
+// on the watch page for a while before pressing play (and provider CDN cookies
+// are short-lived), so keep them for an hour instead of twenty minutes.
+const STREAM_SET_TTL: Duration = Duration::from_secs(60 * 60);
 const PLAYBACK_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const MAX_STREAM_SETS: usize = 512;
 const MAX_PLAYBACK_SESSIONS: usize = 512;
@@ -1781,7 +1784,40 @@ fn extract_hosts_from_text(text: &str) -> HashSet<String> {
         }
         idx = url_start + if is_https { 8 } else { 7 } + end_offset;
     }
+
+    // Protocol-relative references ("//cdn.example.test/seg/1.m4s") carry no
+    // scheme, so the scan above misses them. They still become media routes, so
+    // their authority has to be registered here or the proxy answers 403.
+    let mut relative_idx = 0;
+    while let Some(offset) = text[relative_idx..].find("//") {
+        let start = relative_idx + offset;
+        if let Some(host) = protocol_relative_host(text, start) {
+            hosts.insert(host);
+        }
+        relative_idx = start + 2;
+    }
     hosts
+}
+
+/// Authority of a protocol-relative reference at `start` (`//host:port/path`).
+/// Returns `None` when the `//` belongs to a scheme (`https://`) or has no host.
+fn protocol_relative_host(text: &str, start: usize) -> Option<String> {
+    if start > 0 && text.as_bytes()[start - 1] == b':' {
+        return None;
+    }
+    let after = text[start..].strip_prefix("//")?;
+    let mut end = 0;
+    for (offset, c) in after.char_indices() {
+        if c == '/' || c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')') {
+            break;
+        }
+        end = offset + c.len_utf8();
+    }
+    let host = after[..end].rsplit('@').next().unwrap_or_default().trim();
+    if host.is_empty() || host.contains('\\') {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
 }
 
 fn rewrite_hls_playlist(
@@ -1901,7 +1937,34 @@ fn rewrite_dash_manifest(
     // We replace with media route prefix
     rewritten = rewritten.replace("https://", &format!("/api/media/{}/https/", token));
     rewritten = rewritten.replace("http://", &format!("/api/media/{}/http/", token));
-    rewritten
+
+    // DASH manifests may use protocol-relative references ("//cdn/seg/$Number$.m4s").
+    // Those must be proxied too; otherwise the browser requests the CDN directly
+    // and fails on CORS or on the missing provider Referer. Only reference starts
+    // (an attribute value or a child node) are rewritten so opaque query strings
+    // that merely contain "//" stay untouched.
+    let prefix = format!("/api/media/{}/https/", token);
+    let mut output = String::with_capacity(rewritten.len() + prefix.len());
+    let mut cursor = 0;
+    while let Some(offset) = rewritten[cursor..].find("//") {
+        let start = cursor + offset;
+        let previous = if start == 0 {
+            None
+        } else {
+            rewritten.as_bytes().get(start - 1).copied()
+        };
+        let is_reference_start =
+            start == 0 || matches!(previous, Some(b'"') | Some(b'\'') | Some(b'>'));
+        output.push_str(&rewritten[cursor..start]);
+        if is_reference_start {
+            output.push_str(&prefix);
+        } else {
+            output.push_str("//");
+        }
+        cursor = start + 2;
+    }
+    output.push_str(&rewritten[cursor..]);
+    output
 }
 
 async fn write_manifest_response(
@@ -2184,6 +2247,30 @@ mod tests {
         assert!(parse_media_target("/api/media/token/file/example.test/path").is_none());
         assert!(parse_media_target("/api/media/token/https/user@example.test/path").is_none());
         assert!(parse_media_target("/api/media/token/https/example.test").is_some());
+    }
+
+    #[test]
+    fn host_extraction_registers_protocol_relative_authorities() {
+        let manifest = concat!(
+            "<BaseURL>//cdn2.example.test:8443/dash/</BaseURL>",
+            "<BaseURL>https://cdn1.example.test/dash/</BaseURL>",
+        );
+        let hosts = extract_hosts_from_text(manifest);
+        assert!(hosts.contains("cdn2.example.test:8443"));
+        assert!(hosts.contains("cdn1.example.test"));
+    }
+
+    #[test]
+    fn dash_manifest_rewrites_protocol_relative_references() {
+        let manifest = concat!(
+            "<MPD><BaseURL>https://cdn.example.test/dash/movie/</BaseURL>",
+            "<SegmentTemplate media=\"//cdn2.example.test/seg/$Number$.m4s\"/></MPD>",
+        );
+        let base = Url::parse("https://cdn.example.test/dash/movie/index.mpd").unwrap();
+        let rewritten = rewrite_dash_manifest(manifest, &base, "session", &HashSet::new(), None);
+        assert!(rewritten.contains("/api/media/session/https/cdn2.example.test/seg/$Number$.m4s"));
+        assert!(rewritten.contains("/api/media/session/https/cdn.example.test/dash/movie/"));
+        assert!(!rewritten.contains("\"//cdn2.example.test"));
     }
 
     #[test]

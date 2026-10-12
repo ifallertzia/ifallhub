@@ -15,8 +15,8 @@
  *   MOVIEBOX_API_BIN           If set (and MOVIEBOX_API_TARGET is not), spawn
  *                              `$MOVIEBOX_API_BIN --web-api $MOVIEBOX_API_ADDR`.
  *   MOVIEBOX_API_ADDR          Listen address for the spawned API (default 127.0.0.1:8787).
- *   MOVIEBOX_WEB_RATE_LIMIT    Requests/minute/client for the JSON API (default 120, 0 disables).
- *   MOVIEBOX_WEB_MEDIA_RATE_LIMIT  Requests/minute/client for /api/media (default 600, 0 disables).
+ *   MOVIEBOX_WEB_RATE_LIMIT    Requests/minute/client for the JSON API (default 300, 0 disables).
+ *   MOVIEBOX_WEB_MEDIA_RATE_LIMIT  Requests/minute/client for /api/media (default 1200, 0 disables).
  *
  * Secrets (e.g. MOVIEBOX_WEB_API_TOKEN for the API) belong in the deployment
  * environment, never in this file or the image.

@@ -57,9 +57,9 @@ All configuration is environment-only. Secrets belong in the Render dashboard
 | --- | --- | --- |
 | `PORT` | `3000` | Public port. Render sets this automatically; the server binds `0.0.0.0:$PORT`. |
 | `MOVIEBOX_WEB_API_TOKEN` | unset | Optional shared access key for the JSON API (`/api/health` and `/api/media/*` stay reachable by design). The web UI prompts for it. |
-| `MOVIEBOX_WEB_API_RATE_PER_MIN` | `120` | Per-client request budget inside the Rust API (`0` disables). |
-| `MOVIEBOX_WEB_RATE_LIMIT` | `120` | Edge rate limit for `/api/*` per client per minute (`0` disables). |
-| `MOVIEBOX_WEB_MEDIA_RATE_LIMIT` | `600` | Edge rate limit for `/api/media/*` segments (`0` disables). |
+| `MOVIEBOX_WEB_API_RATE_PER_MIN` | `300` | Per-client request budget inside the Rust API (`0` disables). |
+| `MOVIEBOX_WEB_RATE_LIMIT` | `300` | Edge rate limit for `/api/*` per client per minute (`0` disables). |
+| `MOVIEBOX_WEB_MEDIA_RATE_LIMIT` | `1200` | Edge rate limit for `/api/media/*` segments (`0` disables). A long DASH movie makes many segment requests, so keep this generous. |
 | `MOVIEBOX_DATA_DIR` | platform default | Data directory. The web library (watchlist, resume progress, personal ratings) is stored here as `web_library.json`. Mount a volume to keep it across deploys. |
 | `MOVIEBOX_API_ADDR` | `127.0.0.1:8787` | Loopback address of the spawned Rust API. |
 | `MOVIEBOX_WEB_ROOT` | `web/dist` | Static asset root inside the container. |
@@ -145,6 +145,14 @@ node deploy/smoke.mjs --base http://127.0.0.1:3000 --token devkey --real
 - **Search returns 502** - the provider was unreachable from the service;
   providers occasionally block datacenter IPs. Try again later or configure
   `MOVIEBOX_FOURKHDHUB_URL`/add-ons.
+- **"Playback error" / video never starts** - usually an HEVC (`hvc1`/`hev1`)
+  DASH stream or a `.mkv` direct link, which browsers cannot decode. The player
+  now ranks those releases behind playable H.264/`.mp4` links, marks them in the
+  stream list, and reports the real cause (codec, HTTP status, expired link);
+  expired signed cookies (`403`) and expired stream sets (`410`) trigger an
+  automatic stream-list refresh before giving up. Diagnose the rest with
+  `python3 scripts/check_playback_links.py`; the full cause table and every link
+  the player uses are in [`playback-links.md`](playback-links.md).
 
 ## Scope and compliance
 
