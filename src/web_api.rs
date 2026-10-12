@@ -27,11 +27,15 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use tokio::sync::broadcast;
 use url::Url;
 
+use crate::library::LibraryStore;
+use crate::models::{BrowseMetrics, CatalogItem};
 use crate::providers::ReleaseProvider;
 use crate::providers::models::{
-    PlaybackSource, ProviderError, ProviderKind, Release, ResolutionIntent, SourceMirror,
+    MediaDetails, PlaybackSource, ProviderError, ProviderKind, Release, ResolutionIntent,
+    SourceMirror,
 };
 use crate::service::MovieBoxService;
 
@@ -47,6 +51,16 @@ const MAX_PLAYBACK_SESSIONS: usize = 512;
 const DEFAULT_RATE_PER_MIN: u32 = 300;
 const RATE_BUCKET_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_RATE_BUCKETS: usize = 16384;
+/// Homepage rows come from a remote catalog; cache them so a browser that
+/// renders six carousels does not refetch the provider on every navigation.
+const HOMEPAGE_TTL: Duration = Duration::from_secs(10 * 60);
+const MAX_HOMEPAGE_PAGES: usize = 8;
+const RATING_TTL: Duration = Duration::from_secs(60 * 60);
+const MAX_RATING_CACHE: usize = 4096;
+const MAX_BATCH_IDS: usize = 12;
+/// Server-sent events keep-alive interval; short enough to notice a dropped
+/// socket, long enough to stay out of the client's way.
+const EVENT_KEEPALIVE: Duration = Duration::from_secs(20);
 
 type Headers = HashMap<String, String>;
 
@@ -58,6 +72,25 @@ struct WebState {
     access_token: Option<String>,
     rate_per_minute: u32,
     rate_buckets: Mutex<HashMap<String, TokenBucket>>,
+    /// Watchlist / progress / ratings shared by every connected browser.
+    library: Arc<LibraryStore>,
+    homepage_pages: Mutex<HashMap<String, (Instant, Vec<CatalogRow>)>>,
+    title_meta: Mutex<HashMap<String, (Instant, TitleMeta)>>,
+}
+
+/// One homepage entry plus the metrics the catalog reported for it.
+#[derive(Clone)]
+struct CatalogRow {
+    item: CatalogItem,
+    metrics: BrowseMetrics,
+}
+
+/// Cached detail fields the browser needs on cards without a details request.
+#[derive(Clone)]
+struct TitleMeta {
+    rating: Option<f64>,
+    genres: Vec<String>,
+    duration: Option<String>,
 }
 
 struct TokenBucket {
@@ -128,6 +161,9 @@ impl WebState {
             access_token,
             rate_per_minute,
             rate_buckets: Mutex::new(HashMap::new()),
+            library: LibraryStore::new(),
+            homepage_pages: Mutex::new(HashMap::new()),
+            title_meta: Mutex::new(HashMap::new()),
         }
     }
 
@@ -245,6 +281,12 @@ async fn handle_connection(stream: TcpStream, state: Arc<WebState>) -> io::Resul
         if let Err(response) = state.authorize_api_request(&request) {
             return write_response(&mut write_half, response, request.method == "HEAD").await;
         }
+    }
+
+    // Live library sync. This response never ends on its own: it streams the
+    // current library, then every change, until the browser hangs up.
+    if path == "/api/library/events" && request.method == "GET" {
+        return stream_library_events(&state, &mut write_half).await;
     }
 
     let response = route_api(&request, &state).await;
@@ -468,6 +510,27 @@ async fn route_api(request: &HttpRequest, state: &WebState) -> HttpResponse {
             streams(query, state).await
         }
         "/api/play" if request.method == "POST" => play(request, state).await,
+        "/api/suggest" if request.method == "GET" || request.method == "HEAD" => {
+            suggest(query, state).await
+        }
+        "/api/collections" if request.method == "GET" || request.method == "HEAD" => {
+            collections(query, state).await
+        }
+        "/api/related" if request.method == "GET" || request.method == "HEAD" => {
+            related(query, state).await
+        }
+        "/api/meta" if request.method == "GET" || request.method == "HEAD" => {
+            title_meta_batch(query, state).await
+        }
+        "/api/library" if request.method == "GET" || request.method == "HEAD" => {
+            HttpResponse::json(200, state.library.to_json().await)
+        }
+        "/api/library/watchlist" if request.method == "POST" => {
+            library_watchlist(request, state).await
+        }
+        "/api/library/progress" if request.method == "POST" => library_progress(request, state).await,
+        "/api/library/rating" if request.method == "POST" => library_rating(request, state).await,
+        "/api/library/clear" if request.method == "POST" => library_clear(request, state).await,
         _ => HttpResponse::error(404, "Unknown API route"),
     }
 }
@@ -487,6 +550,653 @@ async fn discover(query: &str, state: &WebState) -> HttpResponse {
             HttpResponse::json(200, json!({ "items": items, "metrics": metrics }))
         }
         Err(error) => HttpResponse::error(502, error),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Discovery extras: carousels, related titles, autocomplete and card metadata
+// ---------------------------------------------------------------------------
+
+struct CollectionRow {
+    key: &'static str,
+    label: &'static str,
+    hint: &'static str,
+}
+
+/// The home screen carousels. `continue` (resume watching) is assembled in the
+/// browser from the library, because it is per-viewer state.
+const COLLECTION_ROWS: [CollectionRow; 4] = [
+    CollectionRow {
+        key: "trending",
+        label: "Trending Now",
+        hint: "What everyone is watching this week",
+    },
+    CollectionRow {
+        key: "top_rated",
+        label: "Top Rated",
+        hint: "Highest IMDb scores of all time",
+    },
+    CollectionRow {
+        key: "fresh",
+        label: "Fresh & Highly Rated",
+        hint: "Recent releases critics liked",
+    },
+    CollectionRow {
+        key: "most_watched",
+        label: "Most Watched",
+        hint: "Community favourites",
+    },
+];
+
+async fn suggest(query: &str, state: &WebState) -> HttpResponse {
+    let params = parse_query(query);
+    let term = params
+        .get("q")
+        .or_else(|| params.get("query"))
+        .map(String::as_str)
+        .unwrap_or_default()
+        .trim();
+    if term.is_empty() {
+        return HttpResponse::json(200, json!({ "suggestions": [] }));
+    }
+    if term.len() > 120 {
+        return HttpResponse::error(400, "Search query is too long");
+    }
+    match state.service.suggest(term).await {
+        Ok(suggestions) => HttpResponse::json(200, json!({ "suggestions": suggestions })),
+        Err(message) => HttpResponse::error(502, message),
+    }
+}
+
+async fn collections(query: &str, state: &WebState) -> HttpResponse {
+    let params = parse_query(query);
+    let per_row = parse_usize(params.get("limit"), 24, 48).clamp(8, 48);
+    let pages = parse_usize(params.get("pages"), 3, MAX_HOMEPAGE_PAGES).clamp(1, MAX_HOMEPAGE_PAGES);
+    let pool = match homepage_pool(state, pages).await {
+        Ok(pool) => pool,
+        Err(message) => return HttpResponse::error(502, message),
+    };
+    let mut rows: Vec<Value> = Vec::new();
+    let mut metrics_map = serde_json::Map::new();
+    for row in COLLECTION_ROWS {
+        let entries = ranked_entries(&pool, row.key, per_row);
+        if entries.is_empty() {
+            continue;
+        }
+        let items: Vec<Value> = entries
+            .into_iter()
+            .map(|entry| {
+                let metric = serde_json::to_value(entry.metrics).unwrap_or(Value::Null);
+                metrics_map.insert(entry.item.id.value.clone(), metric);
+                serde_json::to_value(&entry.item).unwrap_or(Value::Null)
+            })
+            .collect();
+        rows.push(json!({
+            "key": row.key,
+            "label": row.label,
+            "hint": row.hint,
+            "items": items,
+        }));
+    }
+    HttpResponse::json(
+        200,
+        json!({
+            "rows": rows,
+            "metrics": Value::Object(metrics_map),
+            "source": "moviebox",
+        }),
+    )
+}
+
+/// Metric used to rank a carousel.
+fn row_value(row: &CatalogRow, key: &str) -> f64 {
+    match key {
+        "trending" => row.metrics.trending.unwrap_or(0.0),
+        "top_rated" => row.metrics.rating.unwrap_or(0.0),
+        "fresh" => row.metrics.recent_rating.unwrap_or(0.0),
+        _ => row.metrics.popularity.unwrap_or(0.0),
+    }
+}
+
+fn ranked_entries<'a>(pool: &'a [CatalogRow], key: &str, limit: usize) -> Vec<&'a CatalogRow> {
+    let mut entries: Vec<&CatalogRow> = pool
+        .iter()
+        .filter(|row| row_value(row, key) > 0.0)
+        .collect();
+    entries.sort_by(|a, b| {
+        row_value(b, key)
+            .partial_cmp(&row_value(a, key))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    entries.truncate(limit);
+    entries
+}
+
+async fn homepage_pool(state: &WebState, pages: usize) -> Result<Vec<CatalogRow>, String> {
+    let mut pool: Vec<CatalogRow> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for page in 1..=pages {
+        let cache_key = format!("homepage:{page}");
+        let cached = {
+            let cache = state.homepage_pages.lock().await;
+            cache
+                .get(&cache_key)
+                .and_then(|(fetched, rows)| (fetched.elapsed() < HOMEPAGE_TTL).then(|| rows.clone()))
+        };
+        let rows = match cached {
+            Some(rows) => rows,
+            None => {
+                let (items, metrics) = state.service.homepage("2", page).await?;
+                let rows: Vec<CatalogRow> = items
+                    .into_iter()
+                    .map(|item| {
+                        let row_metrics = metrics.get(&item.id.value).copied().unwrap_or_default();
+                        CatalogRow {
+                            item,
+                            metrics: row_metrics,
+                        }
+                    })
+                    .collect();
+                let mut cache = state.homepage_pages.lock().await;
+                cache.retain(|_, (fetched, _)| fetched.elapsed() < HOMEPAGE_TTL);
+                if cache.len() >= MAX_HOMEPAGE_PAGES {
+                    cache.clear();
+                }
+                cache.insert(cache_key, (Instant::now(), rows.clone()));
+                rows
+            }
+        };
+        for row in rows {
+            if seen.insert(row.item.id.value.clone()) {
+                pool.push(row);
+            }
+        }
+    }
+    Ok(pool)
+}
+
+struct RelatedSeed {
+    term: String,
+    reason: String,
+    weight: i32,
+}
+
+const SEED_STOPWORDS: [&str; 14] = [
+    "the", "a", "an", "of", "and", "in", "on", "to", "for", "part", "my", "ii", "iii", "untitled",
+];
+
+/// Search terms that plausibly return titles related to `details`, ordered by
+/// how strongly they predict "you will also like this".
+fn related_seeds(details: &MediaDetails) -> Vec<RelatedSeed> {
+    let mut seeds: Vec<RelatedSeed> = Vec::new();
+    if let Some(director) = details
+        .director
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 80)
+    {
+        seeds.push(RelatedSeed {
+            term: director.to_string(),
+            reason: format!("More from {director}"),
+            weight: 3,
+        });
+    }
+    for genre in details
+        .genres
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .take(3)
+    {
+        seeds.push(RelatedSeed {
+            term: genre.to_string(),
+            reason: format!("Because you like {genre}"),
+            weight: 2,
+        });
+    }
+    if let Some(token) = franchise_token(&details.title) {
+        seeds.push(RelatedSeed {
+            reason: format!("More {token} titles"),
+            term: token,
+            weight: 1,
+        });
+    }
+    seeds.truncate(6);
+    seeds
+}
+
+/// First meaningful word of a title, which usually is the franchise name.
+fn franchise_token(title: &str) -> Option<String> {
+    title
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::trim)
+        .find(|word| {
+            word.chars().count() > 3 && !SEED_STOPWORDS.contains(&word.to_ascii_lowercase().as_str())
+        })
+        .map(str::to_string)
+}
+
+async fn related(query: &str, state: &WebState) -> HttpResponse {
+    let params = parse_query(query);
+    let provider = match parse_provider(params.get("provider")) {
+        Ok(provider) => provider,
+        Err(message) => return HttpResponse::error(400, message),
+    };
+    let id = params
+        .get("id")
+        .map(String::as_str)
+        .unwrap_or_default()
+        .trim();
+    if id.is_empty() || id.len() > 512 {
+        return HttpResponse::error(400, "A valid title id is required");
+    }
+    let limit = parse_usize(params.get("limit"), 18, 40).clamp(6, 40);
+    let details = match state.service.details_typed(provider, id).await {
+        Ok(details) => details,
+        Err(error) => return HttpResponse::error(502, provider_error_message(provider, error)),
+    };
+    let seeds = related_seeds(&details);
+    if seeds.is_empty() {
+        return HttpResponse::json(
+            200,
+            json!({ "items": [], "reasons": {}, "seeds": [], "source_id": id }),
+        );
+    }
+    let searches = futures::future::join_all(
+        seeds
+            .iter()
+            .map(|seed| state.service.search_typed(provider, &seed.term, 1)),
+    )
+    .await;
+
+    let mut order: Vec<String> = Vec::new();
+    let mut scores: HashMap<String, i32> = HashMap::new();
+    let mut items: HashMap<String, CatalogItem> = HashMap::new();
+    let mut reasons: HashMap<String, Vec<String>> = HashMap::new();
+    for (index, result) in searches.into_iter().enumerate() {
+        let Ok(found) = result else { continue };
+        let seed = &seeds[index];
+        for item in found {
+            if item.id.value.trim() == id {
+                continue;
+            }
+            let key = item.id.value.clone();
+            *scores.entry(key.clone()).or_insert(0) += seed.weight;
+            let entry_reasons = reasons.entry(key.clone()).or_default();
+            if !entry_reasons.contains(&seed.reason) {
+                entry_reasons.push(seed.reason.clone());
+            }
+            items.entry(key.clone()).or_insert(item);
+            if !order.contains(&key) {
+                order.push(key);
+            }
+        }
+    }
+    order.sort_by(|a, b| {
+        scores
+            .get(b)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&scores.get(a).copied().unwrap_or(0))
+    });
+    order.truncate(limit);
+
+    let mut selected: Vec<Value> = Vec::new();
+    let mut selected_reasons = serde_json::Map::new();
+    for key in &order {
+        if let Some(item) = items.get(key) {
+            selected.push(serde_json::to_value(item).unwrap_or(Value::Null));
+        }
+        if let Some(entry_reasons) = reasons.get(key) {
+            selected_reasons.insert(key.clone(), json!(entry_reasons));
+        }
+    }
+    HttpResponse::json(
+        200,
+        json!({
+            "items": selected,
+            "reasons": Value::Object(selected_reasons),
+            "seeds": seeds
+                .iter()
+                .map(|seed| json!({ "term": seed.term, "reason": seed.reason }))
+                .collect::<Vec<_>>(),
+            "source_id": id,
+        }),
+    )
+}
+
+/// Card metadata (official rating, genres, runtime) for a batch of ids, so the
+/// browser can show IMDb scores on search results and watchlist entries without
+/// opening every title.
+async fn title_meta_batch(query: &str, state: &WebState) -> HttpResponse {
+    let params = parse_query(query);
+    let provider = match parse_provider(params.get("provider")) {
+        Ok(provider) => provider,
+        Err(message) => return HttpResponse::error(400, message),
+    };
+    let ids: Vec<String> = params
+        .get("id")
+        .map(String::as_str)
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 512)
+        .take(MAX_BATCH_IDS)
+        .map(str::to_string)
+        .collect();
+    if ids.is_empty() {
+        return HttpResponse::json(200, json!({ "meta": {} }));
+    }
+
+    let mut meta = serde_json::Map::new();
+    let mut pending: Vec<String> = Vec::new();
+    {
+        let cache = state.title_meta.lock().await;
+        for id in &ids {
+            let key = format!("{}:{id}", provider.cache_key());
+            match cache.get(&key) {
+                Some((fetched, cached)) if fetched.elapsed() < RATING_TTL => {
+                    meta.insert(id.clone(), meta_json(cached));
+                }
+                _ => pending.push(id.clone()),
+            }
+        }
+    }
+
+    if !pending.is_empty() {
+        let fetched = futures::future::join_all(
+            pending
+                .iter()
+                .map(|id| state.service.details_typed(provider, id)),
+        )
+        .await;
+        let mut resolved: Vec<(String, TitleMeta)> = Vec::new();
+        for (index, result) in fetched.into_iter().enumerate() {
+            let Ok(details) = result else { continue };
+            let rating = details
+                .imdb_rating
+                .as_deref()
+                .and_then(|value| value.trim().parse::<f64>().ok());
+            resolved.push((
+                pending[index].clone(),
+                TitleMeta {
+                    rating,
+                    genres: details.genres.clone(),
+                    duration: details.duration.clone(),
+                },
+            ));
+        }
+        if !resolved.is_empty() {
+            let mut cache = state.title_meta.lock().await;
+            cache.retain(|_, (fetched, _)| fetched.elapsed() < RATING_TTL);
+            if cache.len() >= MAX_RATING_CACHE {
+                cache.clear();
+            }
+            for (id, value) in &resolved {
+                cache.insert(
+                    format!("{}:{id}", provider.cache_key()),
+                    (Instant::now(), value.clone()),
+                );
+            }
+        }
+        for (id, value) in resolved {
+            meta.insert(id, meta_json(&value));
+        }
+    }
+    HttpResponse::json(200, json!({ "meta": Value::Object(meta) }))
+}
+
+fn meta_json(meta: &TitleMeta) -> Value {
+    json!({
+        "rating": meta.rating,
+        "genres": meta.genres,
+        "duration": meta.duration,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Library: watchlist, watch progress and personal ratings
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct LibraryItemRequest {
+    provider: String,
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    poster_url: Option<String>,
+    #[serde(default)]
+    year: Option<String>,
+    #[serde(default)]
+    media_type: Option<String>,
+    #[serde(default)]
+    official_rating: Option<f64>,
+    #[serde(default)]
+    remove: bool,
+}
+
+#[derive(Deserialize)]
+struct ProgressRequest {
+    provider: String,
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    poster_url: Option<String>,
+    #[serde(default)]
+    year: Option<String>,
+    #[serde(default)]
+    media_type: Option<String>,
+    #[serde(default)]
+    season: usize,
+    #[serde(default)]
+    episode: usize,
+    #[serde(default)]
+    position_seconds: u64,
+    #[serde(default)]
+    duration_seconds: Option<u64>,
+    #[serde(default)]
+    completed: bool,
+    #[serde(default)]
+    remove: bool,
+}
+
+#[derive(Deserialize)]
+struct RatingRequest {
+    provider: String,
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    poster_url: Option<String>,
+    #[serde(default)]
+    year: Option<String>,
+    rating: u8,
+}
+
+#[derive(Deserialize)]
+struct ClearRequest {
+    #[serde(default)]
+    scope: String,
+}
+
+fn normalize_media_type(value: Option<String>) -> Option<String> {
+    value.map(|value| {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "series" | "tv" | "show" | "2" => "series",
+            _ => "movie",
+        }
+        .to_string()
+    })
+}
+
+fn parse_library_target(provider: &str, id: &str) -> Result<(ProviderKind, String), HttpResponse> {
+    let kind = match ProviderKind::parse(provider) {
+        Some(kind) => kind,
+        None => return Err(HttpResponse::error(400, "Unknown content provider")),
+    };
+    let id = id.trim();
+    if id.is_empty() || id.len() > 512 {
+        return Err(HttpResponse::error(400, "A valid title id is required"));
+    }
+    Ok((kind, id.to_string()))
+}
+
+async fn library_watchlist(request: &HttpRequest, state: &WebState) -> HttpResponse {
+    let body: LibraryItemRequest = match serde_json::from_slice(&request.body) {
+        Ok(body) => body,
+        Err(error) => {
+            return HttpResponse::error(400, format!("Invalid watchlist request: {error}"))
+        }
+    };
+    let (provider, id) = match parse_library_target(&body.provider, &body.id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let entry = crate::library::watchlist_entry(
+        provider_id(provider),
+        &id,
+        body.title.trim(),
+        body.poster_url,
+        body.year,
+        normalize_media_type(body.media_type),
+        body.official_rating,
+    );
+    let listed = state.library.toggle_watchlist(entry, body.remove).await;
+    library_response(state, json!({ "listed": listed })).await
+}
+
+async fn library_progress(request: &HttpRequest, state: &WebState) -> HttpResponse {
+    let body: ProgressRequest = match serde_json::from_slice(&request.body) {
+        Ok(body) => body,
+        Err(error) => {
+            return HttpResponse::error(400, format!("Invalid progress request: {error}"))
+        }
+    };
+    let (provider, id) = match parse_library_target(&body.provider, &body.id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let entry = crate::library::progress_entry(
+        provider_id(provider),
+        &id,
+        body.title.trim(),
+        body.poster_url,
+        body.year,
+        normalize_media_type(body.media_type),
+        body.season,
+        body.episode,
+        body.position_seconds,
+        body.duration_seconds,
+        body.completed,
+    );
+    let stored = state.library.upsert_progress(entry, body.remove).await;
+    library_response(state, json!({ "stored": stored })).await
+}
+
+async fn library_rating(request: &HttpRequest, state: &WebState) -> HttpResponse {
+    let body: RatingRequest = match serde_json::from_slice(&request.body) {
+        Ok(body) => body,
+        Err(error) => return HttpResponse::error(400, format!("Invalid rating request: {error}")),
+    };
+    let (provider, id) = match parse_library_target(&body.provider, &body.id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let entry = crate::library::rating_entry(
+        provider_id(provider),
+        &id,
+        body.title.trim(),
+        body.poster_url,
+        body.year,
+        body.rating,
+    );
+    let rated = state.library.set_rating(entry).await;
+    library_response(state, json!({ "rated": rated })).await
+}
+
+async fn library_clear(request: &HttpRequest, state: &WebState) -> HttpResponse {
+    let scope = match serde_json::from_slice::<ClearRequest>(&request.body) {
+        Ok(body) => body.scope,
+        Err(_) => String::new(),
+    };
+    let scope = match scope.trim().to_ascii_lowercase().as_str() {
+        "watchlist" | "progress" | "ratings" => scope.trim().to_ascii_lowercase(),
+        _ => "all".to_string(),
+    };
+    state.library.clear(&scope).await;
+    library_response(state, json!({ "cleared": scope })).await
+}
+
+/// Full library payload plus any per-route extras, so one round trip resyncs
+/// the browser after a mutation.
+async fn library_response(state: &WebState, extras: Value) -> HttpResponse {
+    let mut payload = match state.library.to_json().await {
+        Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("library".to_string(), other);
+            map
+        }
+    };
+    if let Value::Object(extras) = extras {
+        for (key, value) in extras {
+            payload.insert(key, value);
+        }
+    }
+    HttpResponse::json(200, Value::Object(payload))
+}
+
+// ---------------------------------------------------------------------------
+// Server-sent events: live library sync
+// ---------------------------------------------------------------------------
+
+async fn write_sse_frame(
+    writer: &mut OwnedWriteHalf,
+    event: &str,
+    payload: &Value,
+) -> io::Result<()> {
+    let body = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+    let frame = format!("event: {event}\ndata: {body}\n\n");
+    writer.write_all(frame.as_bytes()).await?;
+    writer.flush().await
+}
+
+async fn stream_library_events(state: &WebState, writer: &mut OwnedWriteHalf) -> io::Result<()> {
+    const HEADERS: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n\
+                           Cache-Control: no-store, no-transform\r\nX-Accel-Buffering: no\r\n\
+                           Connection: close\r\n\r\n";
+    writer.write_all(HEADERS.as_bytes()).await?;
+    writer.flush().await?;
+
+    let mut receiver = state.library.subscribe();
+    let initial = state.library.to_json().await;
+    if write_sse_frame(writer, "library", &initial).await.is_err() {
+        return Ok(());
+    }
+    let mut ticker = tokio::time::interval(EVENT_KEEPALIVE);
+    // The first tick fires immediately; consume it so keep-alives stay spaced.
+    ticker.tick().await;
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                if write_sse_frame(writer, "ping", &json!({})).await.is_err() {
+                    return Ok(());
+                }
+            }
+            received = receiver.recv() => match received {
+                Ok(_event) => {
+                    let payload = state.library.to_json().await;
+                    if write_sse_frame(writer, "library", &payload).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return Ok(()),
+            },
+        }
     }
 }
 
@@ -1705,5 +2415,121 @@ mod tests {
 
         proxy_task.await.unwrap();
         upstream_task.await.unwrap();
+    }
+
+    fn catalog_row(id: &str, trending: Option<f64>, rating: Option<f64>) -> CatalogRow {
+        CatalogRow {
+            item: CatalogItem {
+                id: crate::providers::models::ProviderMediaId {
+                    provider: ProviderKind::MovieBox,
+                    value: id.to_string(),
+                },
+                title: format!("Title {id}"),
+                media_type: crate::providers::models::MediaType::Movie,
+                year: Some("2024".to_string()),
+                poster_url: None,
+                season_count: None,
+            },
+            metrics: BrowseMetrics {
+                trending,
+                rating,
+                recent_rating: rating,
+                popularity: trending,
+            },
+        }
+    }
+
+    fn details_for(title: &str, director: Option<&str>, genres: &[&str]) -> MediaDetails {
+        MediaDetails {
+            id: crate::providers::models::ProviderMediaId {
+                provider: ProviderKind::MovieBox,
+                value: "subject-1".to_string(),
+            },
+            title: title.to_string(),
+            media_type: crate::providers::models::MediaType::Movie,
+            year: Some("2014".to_string()),
+            description: None,
+            tagline: None,
+            imdb_rating: Some("8.7".to_string()),
+            director: director.map(str::to_string),
+            stars: None,
+            prints: None,
+            audios: None,
+            poster_url: None,
+            duration: Some("169m".to_string()),
+            genres: genres.iter().map(|genre| genre.to_string()).collect(),
+            seasons: vec![],
+            dubs: vec![],
+        }
+    }
+
+    #[test]
+    fn related_seeds_prefer_director_then_genres_then_franchise() {
+        let seeds = related_seeds(&details_for(
+            "Interstellar: Beyond",
+            Some("Christopher Nolan"),
+            &["Science Fiction", "Drama", "Adventure", "Mystery"],
+        ));
+        let terms: Vec<&str> = seeds.iter().map(|seed| seed.term.as_str()).collect();
+        assert_eq!(terms[0], "Christopher Nolan");
+        assert_eq!(terms[1], "Science Fiction");
+        assert_eq!(seeds.len(), 5, "director + 3 genres + franchise token");
+        assert!(seeds.iter().any(|seed| seed.term == "Interstellar"));
+    }
+
+    #[test]
+    fn related_seeds_skip_stopword_titles_and_blank_directors() {
+        let seeds = related_seeds(&details_for("The Thing", Some("  "), &[]));
+        assert!(seeds.is_empty(), "no usable seeds: {seeds:?}");
+        let franchise = related_seeds(&details_for("Dune: Part Two", None, &[]));
+        assert_eq!(franchise.len(), 1);
+        assert_eq!(franchise[0].term, "Dune");
+    }
+
+    #[test]
+    fn franchise_token_ignores_short_and_stopword_leads() {
+        assert_eq!(franchise_token("Dune: Part Two").as_deref(), Some("Dune"));
+        assert_eq!(franchise_token("The Batman").as_deref(), Some("Batman"));
+        assert_eq!(franchise_token("Up").as_deref(), None);
+    }
+
+    #[test]
+    fn ranked_entries_sort_by_the_row_metric_and_drop_unranked() {
+        let pool = vec![
+            catalog_row("low", Some(10.0), Some(6.1)),
+            catalog_row("none", None, None),
+            catalog_row("high", Some(90.0), Some(9.2)),
+        ];
+        let trending: Vec<&str> = ranked_entries(&pool, "trending", 10)
+            .iter()
+            .map(|row| row.item.id.value.as_str())
+            .collect();
+        assert_eq!(trending, vec!["high", "low"]);
+        let top_rated: Vec<&str> = ranked_entries(&pool, "top_rated", 1)
+            .iter()
+            .map(|row| row.item.id.value.as_str())
+            .collect();
+        assert_eq!(top_rated, vec!["high"]);
+    }
+
+    #[test]
+    fn media_type_normalisation_defaults_to_movie() {
+        assert_eq!(
+            normalize_media_type(Some("TV".to_string())).as_deref(),
+            Some("series")
+        );
+        assert_eq!(
+            normalize_media_type(Some("weird".to_string())).as_deref(),
+            Some("movie")
+        );
+        assert_eq!(normalize_media_type(None), None);
+    }
+
+    #[test]
+    fn library_targets_reject_unknown_providers_and_blank_ids() {
+        assert!(parse_library_target("moviebox", "42").is_ok());
+        assert!(parse_library_target("not-a-source", "42").is_err());
+        assert!(parse_library_target("moviebox", "   ").is_err());
+        assert!(parse_library_target("moviebox", &"x".repeat(600)).is_err());
     }
 }

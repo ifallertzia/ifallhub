@@ -1,1593 +1,295 @@
+// App shell: navigation, routing, global card actions and engine status.
+
 import './style.css';
 
-let shakaModulePromise;
+import * as api from './lib/api.js';
+import * as library from './lib/library.js';
+import { handleRoute, navigate, onRoute, parseRoute, start as startRouter, titlePath, watchPath } from './lib/router.js';
+import { applyMetaToDom, app, ensureMeta, onMeta, toast } from './state.js';
+import { escapeHtml, providerLabel } from './lib/format.js';
+import { renderHome } from './views/home.js';
+import { bindSearchSuggestions, renderBrowse, runSearch, searchFromRoute } from './views/browse.js';
+import { renderDetails } from './views/details.js';
+import { renderMyList } from './views/mylist.js';
+import { renderTracker } from './views/tracker.js';
+import { renderWatch, stopPlayback } from './views/watch.js';
 
-const state = {
-  provider: 'moviebox',
-  query: '',
-  results: [],
-  item: null,
-  details: null,
-  releases: [],
-  streamSetId: null,
-  selectedRelease: 0,
-  season: 0,
-  episode: 0,
-  isSeries: false,
-  activePlayer: null,
-  playbackRunId: 0,
-  playbackController: null,
-  autoPlaybackActive: false,
-  discoverItems: [],
-  requestNumber: 0,
-  currentRoute: '/',
-  providerCache: {},
-  serverOrder: [],
-  serverStatus: {},
-  currentServer: null,
-  isNavigating: false,
-  playbackHistory: [],
+const view = document.querySelector('#view');
+const searchInput = document.querySelector('#search-input');
+const searchList = document.querySelector('#search-suggestions');
+const searchForm = document.querySelector('#search-form');
+let activeRoute = parseRoute();
+
+// --- Engine status ---------------------------------------------------------
+
+const ENGINE_LABELS = {
+  checking: 'Connecting…',
+  connected: 'Engine connected',
+  demo: 'Demo preview',
+  offline: 'Engine offline',
 };
 
-const $ = (selector, root = document) => root.querySelector(selector);
-const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const searchForm = $('#search-form');
-const searchInput = $('#search-input');
-const providerSelect = $('#provider-select');
-const resultsGrid = $('#results-grid');
-const resultCount = $('#result-count');
-const resultsTitle = $('#results-title');
-const resultsKicker = $('#results-kicker');
-const emptyState = $('#empty-state');
-const loadingState = $('#loading-state');
-const errorState = $('#error-state');
-const detailsDialog = $('#details-dialog');
-const detailsContent = $('#details-content');
-const playerDialog = $('#player-dialog');
-const videoElement = $('#video-element');
-const videoError = $('#video-error-overlay');
-const homePage = $('#home-page');
-const detailsPage = $('#details-page');
-const detailsPageContent = $('#details-page-content');
-const playerPage = $('#player-page');
-let searchTimer = 0;
-let detailRequestNumber = 0;
-// Faster switching: reduced from 15000 to 6500ms for quick fallback
-const STREAM_START_TIMEOUT_MS = 6500;
-const STABLE_PLAYBACK_MS = 1200;
-// Auto-play order: Sakshi (dramachi) first, then Ritu, then Siddharth, then the rest.
-// The source picker still defaults to Siddharth; this only controls playback order.
-const SERVER_ROTATION = ['dramachi', 'fourkhdhub', 'moviebox', 'addons', 'bdix_circleftp', 'bdix_dhakaflix'];
-const PROVIDER_PRIORITY = Object.fromEntries(SERVER_ROTATION.map((provider, index) => [provider, index]));
-
-function escapeHtml(value = '') {
-  return String(value).replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-  })[char]);
-}
-
-function apiUrl(path, params = {}) {
-  const url = new URL(path, window.location.origin);
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
-  }
-  return `${url.pathname}${url.search}`;
-}
-
-async function api(path, options = {}) {
-  const headers = { Accept: 'application/json', ...(options.headers || {}) };
-  const key = getAccessKey();
-  if (key) headers['X-MovieBox-Key'] = key;
-  const response = await fetch(path, { ...options, headers });
-  const contentType = response.headers.get('content-type') || '';
-  const payload = contentType.includes('application/json')
-    ? await response.json()
-    : { error: await response.text() };
-  const attempt = options.accessAttempts || 0;
-  if (response.status === 401 && attempt < 3) {
-    setAccessKey('');
-    const unlocked = await promptAccessKey();
-    if (unlocked) return api(path, { ...options, accessAttempts: attempt + 1 });
-  }
-  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
-  return payload;
-}
-
-const ACCESS_KEY_STORAGE = 'moviebox_access_key';
-
-function getAccessKey() {
-  try {
-    return localStorage.getItem(ACCESS_KEY_STORAGE) || '';
-  } catch {
-    return '';
-  }
-}
-
-function setAccessKey(key) {
-  try {
-    if (key) localStorage.setItem(ACCESS_KEY_STORAGE, key);
-    else localStorage.removeItem(ACCESS_KEY_STORAGE);
-  } catch {
-    /* Storage can be unavailable in private contexts. */
-  }
-}
-
-function promptAccessKey() {
-  return new Promise((resolve) => {
-    const dialog = $('#access-dialog');
-    const form = $('#access-form');
-    const input = $('#access-input');
-    if (!dialog || !form || !input) return resolve(false);
-    const onSubmit = (event) => {
-      event.preventDefault();
-      const value = input.value.trim();
-      if (!value) return;
-      setAccessKey(value);
-      input.value = '';
-      cleanup();
-      dialog.close();
-      resolve(true);
-    };
-    const onClose = () => {
-      cleanup();
-      resolve(false);
-    };
-    const cleanup = () => {
-      form.removeEventListener('submit', onSubmit);
-      dialog.removeEventListener('close', onClose);
-    };
-    form.addEventListener('submit', onSubmit);
-    dialog.addEventListener('close', onClose);
-    if (!dialog.open) dialog.showModal();
-    input.focus();
-  });
-}
-
-function setEngineStatus(status, label) {
-  const element = $('#engine-status');
-  if (!element) return;
-  element.dataset.state = status;
-  const txt = $('#engine-status-text');
-  if (txt) txt.textContent = label;
-}
-
-async function checkEngine() {
-  try {
-    const health = await api('/api/health');
-    if (health.mode === 'demo') setEngineStatus('demo', 'Demo preview');
-    else setEngineStatus('connected', 'Engine connected');
-  } catch {
-    setEngineStatus('offline', 'Engine offline');
-  }
-}
-
-function setLoading(isLoading) {
-  if (!loadingState || !errorState || !emptyState || !resultsGrid) return;
-  loadingState.hidden = !isLoading;
-  errorState.hidden = true;
-  emptyState.hidden = isLoading || state.results.length > 0;
-  resultsGrid.hidden = isLoading || state.results.length === 0;
-  if (resultCount) resultCount.textContent = isLoading ? '' : resultCount.textContent;
-}
-
-function setError(title, message) {
-  if (!loadingState || !emptyState || !resultsGrid || !errorState) return;
-  loadingState.hidden = true;
-  emptyState.hidden = true;
-  resultsGrid.hidden = true;
-  errorState.hidden = false;
-  const t = $('#error-title');
-  const m = $('#error-message');
-  if (t) t.textContent = title;
-  if (m) m.textContent = displayUiText(message);
-  if (resultCount) resultCount.textContent = '';
-}
-
-function setEmptyMessage(title, message) {
-  if (!loadingState || !errorState || !resultsGrid || !emptyState) return;
-  loadingState.hidden = true;
-  errorState.hidden = true;
-  resultsGrid.hidden = true;
-  emptyState.hidden = false;
-  emptyState.innerHTML = `
-    <div class="empty-icon"><span></span><span></span><span></span></div>
-    <h3>${escapeHtml(title)}</h3>
-    <p>${escapeHtml(message)}</p>
-  `;
-  if (resultCount) resultCount.textContent = '';
-}
-
-function hashTitle(value) {
-  let hash = 0;
-  for (const char of value) hash = (hash * 31 + char.charCodeAt(0)) | 0;
-  return Math.abs(hash % 360);
-}
-
-function itemProvider(item) {
-  return item?.id?.provider || item?.provider || state.provider;
-}
-
-function itemId(item) {
-  return item?.id?.value || item?.id || '';
-}
-
-function providerLabel(provider) {
-  const key = String(provider || '').trim().toLowerCase();
-  const labels = {
-    moviebox: 'Siddharth',
-    fourkhdhub: 'Ritu',
-    dramachi: 'Sakshi',
-    bdix_circleftp: 'Shreya',
-    bdix_dhakaflix: 'Everyone',
-    addons: 'Ifallhub',
-  };
-  return labels[key] || displayUiText(provider) || 'Source';
-}
-
-function displayUiText(value = '') {
-  return String(value)
-    .replace(/\bmovie\s*box(?:-tui)?\b/gi, 'Ifallhub')
-    .replace(/\b4k\s*hd\s*hub\b/gi, 'Ritu')
-    .replace(/\bdrama\s*chi\b/gi, 'Sakshi')
-    .replace(/\bcircle\s*ftp(?:\s*\(bdix\))?\b/gi, 'Shreya')
-    .replace(/\bdhaka\s*flix(?:\s*\(bdix\))?\b/gi, 'Everyone')
-    .replace(/\bcommunity\s*add[ -]?ons?\b/gi, 'Ifallhub');
-}
-
-function prettySize(size) {
-  const bytes = Number(size);
-  if (!bytes || bytes < 0) return '';
-  const units = ['B', 'MB', 'GB', 'TB'];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
-}
-
-// --- ROUTING (sub pages, not popups) ---
-function parseRoute() {
-  const path = window.location.pathname;
-  const search = new URLSearchParams(window.location.search);
-  // /title/:provider/:id
-  const titleMatch = path.match(/^\/title\/([^\/]+)\/(.+)$/);
-  if (titleMatch) {
-    return { name: 'details', provider: decodeURIComponent(titleMatch[1]), id: decodeURIComponent(titleMatch[2]), query: search };
-  }
-  // /watch or /player
-  if (path.startsWith('/watch') || path.startsWith('/player')) {
-    return { name: 'player', query: search };
-  }
-  return { name: 'home', query: search };
-}
-
-function navigate(path, replace = false) {
-  if (replace) history.replaceState(null, '', path);
-  else history.pushState(null, '', path);
-  handleRoute();
-}
-
-function updateBreadcrumb(route) {
-  const current = $('#breadcrumb-current');
-  const navDiscover = $('#nav-discover');
-  if (!current) return;
-  $$('.nav-item', document).forEach(el => el.classList.remove('active'));
-  if (route.name === 'home') {
-    current.textContent = 'Discover';
-    if (navDiscover) navDiscover.classList.add('active');
-  } else if (route.name === 'details') {
-    current.textContent = state.details?.title || state.item?.title || 'Title details';
-    // keep discover active but show sub
-  } else if (route.name === 'player') {
-    current.textContent = state.details?.title || 'Now playing';
-  }
-}
-
-function showPage(name) {
-  if (homePage) homePage.hidden = name !== 'home';
-  if (detailsPage) detailsPage.hidden = name !== 'details';
-  if (playerPage) playerPage.hidden = name !== 'player';
-  // Close any open dialogs when navigating to pages
-  try { detailsDialog?.close(); } catch {}
-  try { playerDialog?.close(); } catch {}
-  state.currentRoute = name;
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-}
-
-async function handleRoute() {
-  const route = parseRoute();
-  updateBreadcrumb(route);
-  if (route.name === 'home') {
-    showPage('home');
-    const q = route.query.get('q');
-    const provider = route.query.get('provider');
-    if (provider && ProviderKindValid(provider)) {
-      syncProvider(provider);
-    }
-    if (q) {
-      if (searchInput) searchInput.value = q;
-      await runSearch(q, false);
-    } else if (!state.results.length && !state.query) {
-      // Only load discover if not already searching
-      if (state.discoverItems.length) renderDiscover(state.discoverItems);
-      else loadDiscover();
-    }
-  } else if (route.name === 'details') {
-    showPage('details');
-    // Load details if needed
-    const provider = route.provider;
-    const id = route.id;
-    if (!provider || !id) {
-      navigate('/', true);
-      return;
-    }
-    // If we already have this item loaded, reuse, else fetch
-    const item = { id: { provider, value: id }, provider, title: state.details?.title || id };
-    if (state.item && itemProvider(state.item) === provider && itemId(state.item) === id && state.details) {
-      renderDetailsPage(state.details);
-      if (!state.releases.length) loadStreams();
-    } else {
-      await openDetails(item, true);
-    }
-  } else if (route.name === 'player') {
-    showPage('player');
-    // If no active playback, go back to details or home
-    // Auto-play navigates here before the origin server's links have loaded
-    // (it resolves servers itself), so only bounce when nothing is playing.
-    if (!state.autoPlaybackActive && (!state.streamSetId || !state.releases.length)) {
-      // Try to recover from history or go home
-      if (state.item) {
-        navigate(`/title/${encodeURIComponent(itemProvider(state.item))}/${encodeURIComponent(itemId(state.item))}`, true);
-      } else {
-        navigate('/', true);
-      }
-    }
-  }
-}
-
-function ProviderKindValid(p) {
-  return ['moviebox','fourkhdhub','dramachi','bdix_circleftp','bdix_dhakaflix','addons'].includes(p);
-}
-
-// --- Sorting releases to bring playable links to top ---
-function scoreRelease(release) {
-  const provider = String(release.provider || state.provider || '').toLowerCase();
-  const providerScore = PROVIDER_PRIORITY[provider] ?? 10;
-  const quality = release.quality || 'AUTO';
-  let qualityScore = 0;
-  const qLower = quality.toLowerCase();
-  if (qLower.includes('2160') || qLower.includes('4k') || qLower.includes('uhd')) qualityScore = 0;
-  else if (qLower.includes('1080')) qualityScore = 1;
-  else if (qLower.includes('720')) qualityScore = 2;
-  else if (qLower.includes('480')) qualityScore = 3;
-  else if (qLower.includes('360')) qualityScore = 4;
-  else qualityScore = 5;
-  // Prefer releases with mirrors and size
-  const hasMirror = (release.mirrors?.length || 0) > 0 ? 0 : 10;
-  const size = release.size_bytes ? 0 : 1; // prefer known size
-  // Prefer direct_file or known good
-  const directBonus = release.mirrors?.some(m => m.direct_file) ? -1 : 0;
-  return providerScore * 100 + qualityScore * 10 + hasMirror + size + directBonus;
-}
-
-function sortReleases(releases) {
-  return [...releases].sort((a, b) => {
-    const sa = scoreRelease(a);
-    const sb = scoreRelease(b);
-    if (sa !== sb) return sa - sb;
-    // Higher resolution first if same provider
-    const ra = a.quality ? parseInt(a.quality) || 0 : 0;
-    const rb = b.quality ? parseInt(b.quality) || 0 : 0;
-    return rb - ra;
-  });
-}
-
-function renderCards(items) {
-  state.results = Array.isArray(items) ? items : [];
-  if (!resultsGrid) return;
-  resultsGrid.innerHTML = '';
-  if (errorState) errorState.hidden = true;
-  if (loadingState) loadingState.hidden = true;
-  resultsGrid.hidden = state.results.length === 0;
-  if (emptyState) emptyState.hidden = state.results.length > 0;
-  if (resultCount) resultCount.textContent = state.results.length
-    ? `${state.results.length} ${state.results.length === 1 ? 'TITLE' : 'TITLES'}`
-    : '';
-
-  if (!state.results.length) {
-    setEmptyMessage(
-      state.query ? 'No titles found just yet.' : 'Every good story starts somewhere.',
-      state.query
-        ? 'Try another spelling, or switch to a different source.'
-        : 'Search a title above, or pick a quick search to get started.',
-    );
-    return;
-  }
-
-  resultsGrid.innerHTML = state.results.map((item, index) => {
-    const title = item.title || 'Untitled';
-    const hue = hashTitle(title);
-    const cover = item.poster_url || item.cover_url;
-    const poster = cover
-      ? `<img src="${escapeHtml(cover)}" alt="${escapeHtml(title)} poster" loading="lazy" />`
-      : '';
-    const type = item.media_type === 'series' || item.stype === 2 ? 'SERIES' : 'MOVIE';
-    const year = item.year || item.release_year || '';
-    const provider = itemProvider(item);
-    const sourceName = providerLabel(provider);
-
-    return `
-      <article class="movie-card" role="button" tabindex="0" data-card-index="${index}" aria-label="View ${escapeHtml(title)} details">
-        <div class="movie-poster" style="--poster-glow: hsla(${hue}, 64%, 57%, .55); --poster-top: hsl(${hue}, 23%, 27%);">
-          ${poster}
-          <div class="poster-fallback" ${cover ? 'hidden' : ''}>
-            <span class="fallback-top">IFALLHUB · ${escapeHtml(sourceName.toUpperCase())}</span>
-            <div class="fallback-art"><span>${escapeHtml(title.trim().slice(0, 1).toUpperCase())}</span></div>
-            <span class="fallback-bottom">${escapeHtml(title)}</span>
-          </div>
-          <span class="card-type">${type}</span>
-          <span class="card-overlay"><span class="card-play"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z" /></svg></span></span>
-        </div>
-        <h3 class="movie-card-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
-        <div class="movie-card-meta">
-          ${year ? `<span>${escapeHtml(year)}</span><span class="meta-separator"></span>` : ''}
-          <span>${escapeHtml(sourceName)}</span>
-        </div>
-      </article>
-    `;
-  }).join('');
-
-  $$('.movie-poster img', resultsGrid).forEach((image) => {
-    image.addEventListener('error', () => {
-      image.remove();
-      const fallback = $('.poster-fallback', image.parentElement);
-      if (fallback) fallback.hidden = false;
-    }, { once: true });
-  });
-
-  $$('.movie-card', resultsGrid).forEach((card) => {
-    const open = () => {
-      const item = state.results[Number(card.dataset.cardIndex)];
-      if (item) openDetails(item);
-    };
-    card.addEventListener('click', open);
-    card.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        open();
-      }
-    });
-    // Prefetch details on hover for speed
-    card.addEventListener('mouseenter', () => {
-      const item = state.results[Number(card.dataset.cardIndex)];
-      if (item) {
-        const provider = itemProvider(item);
-        const id = itemId(item);
-        // Warm cache, no await
-        api(apiUrl('/api/details', { provider, id })).catch(() => {});
-      }
-    }, { once: true });
-  });
-}
-
-function renderDiscover(items) {
-  state.query = '';
-  if (resultsKicker) resultsKicker.textContent = 'PICKED FOR YOU';
-  if (resultsTitle) resultsTitle.textContent = "Tonight's possibilities";
-  renderCards(items);
-}
-
-async function loadDiscover() {
-  state.query = '';
-  if (resultsKicker) resultsKicker.textContent = 'PICKED FOR YOU';
-  if (resultsTitle) resultsTitle.textContent = "Tonight's possibilities";
-  setLoading(true);
-  try {
-    const data = await api('/api/discover?provider=moviebox');
-    state.discoverItems = data.items || [];
-    renderDiscover(state.discoverItems);
-  } catch (error) {
-    state.results = [];
-    setEmptyMessage('Every good story starts somewhere.', 'Search a title above, or pick a quick search to get started.');
-    if (resultCount) resultCount.textContent = '';
-    if (error.message && !error.message.toLowerCase().includes('unknown')) {
-      setEngineStatus('offline', 'Engine offline');
-    }
-  }
-}
-
-async function runSearch(value = searchInput?.value || '', updateUrl = true) {
-  const query = value.trim();
-  clearTimeout(searchTimer);
-  state.query = query;
-  if (!query) {
-    if (updateUrl) navigate('/', false);
-    return loadDiscover();
-  }
-  if (resultsKicker) resultsKicker.textContent = 'SEARCH RESULTS';
-  if (resultsTitle) resultsTitle.textContent = `Results for “${query}”`;
-  setLoading(true);
-  const request = ++state.requestNumber;
-  if (updateUrl) {
-    const url = apiUrl('/', { q: query, provider: state.provider });
-    // Use replaceState for typing to avoid history spam, pushState on submit
-    navigate(url, false);
-  }
-  try {
-    const items = await api(apiUrl('/api/search', {
-      q: query,
-      provider: state.provider,
-      page: 1,
-    }));
-    if (request !== state.requestNumber) return;
-    renderCards(items);
-  } catch (error) {
-    if (request !== state.requestNumber) return;
-    setError('Search couldn’t finish', error.message || 'The source did not return results.');
-  }
-}
-
-function renderDetailsLoading() {
-  const loadingHtml = `
-    <div class="details-loading"><div class="loading-spinner"></div><span>Loading details…</span></div>
-  `;
-  if (detailsPageContent) detailsPageContent.innerHTML = loadingHtml;
-  if (detailsContent) detailsContent.innerHTML = `
-    <button class="dialog-close" type="button" data-close="details" aria-label="Close details">×</button>
-    ${loadingHtml}
-  `;
-}
-
-function seasonByNumber(details, number) {
-  return (details?.seasons || []).find((season) => Number(season.number) === Number(number));
-}
-
-function renderDetailsPage(details) {
-  const item = state.item || {};
-  const title = details.title || item.title || 'Untitled';
-  const poster = details.poster_url || item.poster_url || item.cover_url;
-  const isSeries = details.media_type === 'series' || (details.seasons || []).length > 0;
-  const year = details.year || item.year || '';
-  const type = isSeries ? 'SERIES' : 'FEATURE FILM';
-  const rating = details.imdb_rating
-    ? `<span class="rating-badge">★ ${escapeHtml(details.imdb_rating)}</span>`
-    : '';
-  const genres = (details.genres || []).slice(0, 5).map((genre) => `<span class="genre-chip">${escapeHtml(genre)}</span>`).join('');
-  const cover = poster
-    ? `<img src="${escapeHtml(poster)}" alt="${escapeHtml(title)} poster" />`
-    : `<div class="poster-fallback"><span class="fallback-top">IFALLHUB WEB</span><div class="fallback-art"><span>${escapeHtml(title.slice(0, 1))}</span></div><span class="fallback-bottom">${escapeHtml(title)}</span></div>`;
-  const seasonOptions = (details.seasons || []).map((season) =>
-    `<option value="${Number(season.number)}" ${Number(season.number) === Number(state.season) ? 'selected' : ''}>Season ${Number(season.number)}</option>`,
-  ).join('');
-  const episodes = seasonByNumber(details, state.season)?.episodes || [];
-  const episodeOptions = episodes.map((episode) => {
-    const label = episode.title ? `Episode ${Number(episode.number)} · ${escapeHtml(episode.title)}` : `Episode ${Number(episode.number)}`;
-    return `<option value="${Number(episode.number)}" ${Number(episode.number) === Number(state.episode) ? 'selected' : ''}>${label}</option>`;
-  }).join('');
-  const episodeControls = isSeries
-    ? `<div class="episode-pickers">
-         ${seasonOptions ? `<label>SEASON<select id="season-select">${seasonOptions}</select></label>` : ''}
-         ${episodeOptions ? `<label>EPISODE<select id="episode-select">${episodeOptions}</select></label>` : ''}
-       </div>`
-    : '';
-
-  const html = `
-    <section class="detail-hero">
-      <div class="detail-cover">${cover}</div>
-      <div class="detail-copy">
-        <div class="detail-eyebrow"><span></span>${type} · ${escapeHtml(providerLabel(itemProvider(item)))}</div>
-        <h2>${escapeHtml(title)}</h2>
-        <div class="detail-meta">
-          ${year ? `<span>${escapeHtml(year)}</span>` : ''}
-          ${details.duration ? `<span>${year ? '·' : ''} ${escapeHtml(details.duration)}</span>` : ''}
-          ${rating}
-        </div>
-        <p class="detail-description">${escapeHtml(details.description || details.tagline || 'Choose a stream below to start watching.')}</p>
-        ${details.director ? `<div class="detail-credits"><span>Directed by <strong>${escapeHtml(details.director)}</strong></span></div>` : ''}
-        ${genres ? `<div class="detail-genres">${genres}</div>` : ''}
-      </div>
-    </section>
-    <section class="streams-panel">
-      <div class="stream-controls">
-        <div class="stream-heading"><div class="section-kicker">AVAILABLE SOURCES</div><h3>Choose a stream</h3><p id="stream-subtitle">Checking configured sources…</p></div>
-        ${episodeControls}
-      </div>
-      <div class="stream-list" id="stream-list"><div class="detail-busy"><span class="loading-spinner"></span>Finding available streams…</div></div>
-      <div class="stream-actions">
-        <div class="stream-note">Play automatically tries Sakshi, then Ritu, then Siddharth, then the other servers, in order. Every link also has its own download button.</div>
-        <button class="play-button" id="play-selected" type="button" disabled>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z" /></svg><span>Play automatically</span>
-        </button>
-      </div>
-    </section>
-  `;
-
-  if (detailsPageContent) detailsPageContent.innerHTML = html;
-  if (detailsContent) {
-    detailsContent.innerHTML = `
-      <button class="dialog-close" type="button" data-close="details" aria-label="Close details">×</button>
-      ${html}
-    `;
-  }
-
-  const attachEvents = (root) => {
-    const coverImage = $('.detail-cover img', root);
-    if (coverImage) {
-      coverImage.addEventListener('error', () => {
-        const hue = hashTitle(title);
-        const fallback = document.createElement('div');
-        fallback.className = 'poster-fallback';
-        fallback.style.setProperty('--poster-glow', `hsla(${hue}, 64%, 57%, .55)`);
-        fallback.innerHTML = `<span class="fallback-top">IFALLHUB WEB</span><div class="fallback-art"><span>${escapeHtml(title.slice(0, 1))}</span></div><span class="fallback-bottom">${escapeHtml(title)}</span>`;
-        coverImage.replaceWith(fallback);
-      }, { once: true });
-    }
-    $('#season-select', root)?.addEventListener('change', (event) => {
-      state.season = Number(event.target.value);
-      const season = seasonByNumber(state.details, state.season);
-      state.episode = Number(season?.episodes?.[0]?.number || 1);
-      renderDetailsPage(state.details);
-      loadStreams();
-    });
-    $('#episode-select', root)?.addEventListener('change', (event) => {
-      state.episode = Number(event.target.value);
-      loadStreams();
-    });
-    $('#play-selected', root)?.addEventListener('click', () => playSelected());
-  };
-
-  if (detailsPageContent) attachEvents(detailsPageContent);
-  if (detailsContent) attachEvents(detailsContent);
-}
-
-async function openDetails(item, isRouteNavigation = false) {
-  state.item = item;
-  state.details = null;
-  state.releases = [];
-  state.streamSetId = null;
-  state.selectedRelease = 0;
-  state.providerCache = {};
-  state.serverOrder = [];
-  state.serverStatus = {};
-  state.currentServer = null;
-  const request = ++detailRequestNumber;
-  renderDetailsLoading();
-  if (!isRouteNavigation) {
-    const provider = itemProvider(item);
-    const id = itemId(item);
-    navigate(`/title/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`);
-    showPage('details');
-  }
-
-  try {
-    const details = await api(apiUrl('/api/details', {
-      provider: itemProvider(item),
-      id: itemId(item),
-    }));
-    if (request !== detailRequestNumber) return;
-    state.details = details;
-    state.isSeries = details.media_type === 'series' || (details.seasons || []).length > 0;
-    state.season = state.isSeries ? Number(details.seasons?.[0]?.number || 1) : 0;
-    state.episode = state.isSeries
-      ? Number(details.seasons?.[0]?.episodes?.[0]?.number || 1)
-      : 0;
-    renderDetailsPage(details);
-    updateBreadcrumb({ name: 'details' });
-    loadStreams();
-  } catch (error) {
-    if (request !== detailRequestNumber) return;
-    const errHtml = `
-      <div class="details-loading"><div class="error-mark">!</div><span>${escapeHtml(displayUiText(error.message || 'Could not load title details.'))}</span></div>
-    `;
-    if (detailsPageContent) detailsPageContent.innerHTML = errHtml;
-    if (detailsContent) detailsContent.innerHTML = `
-      <button class="dialog-close" type="button" data-close="details" aria-label="Close details">×</button>
-      ${errHtml}
-    `;
-  }
-}
-
-function playButtonEl() {
-  return $('#play-selected', detailsPageContent) || $('#play-selected', detailsContent);
-}
-
-function streamListEl() {
-  return $('#stream-list', detailsPageContent) || $('#stream-list', detailsContent);
-}
-
-function streamSubtitleEl() {
-  return $('#stream-subtitle', detailsPageContent) || $('#stream-subtitle', detailsContent);
-}
-
-const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
-
-// Builds a sorted release list for one server. `serverIndex` keeps the position
-// the API used when it stored the stream set, so /api/play always points at the
-// release that was displayed, even after we re-sort for display.
-function buildStreamEntry(provider, item, response = {}) {
-  const raw = response.releases || response.streams || [];
-  const releases = sortReleases(raw.map((release, serverIndex) => ({ ...release, serverIndex })));
-  return { provider, item, streamSetId: response.stream_set_id || null, releases };
-}
-
-function applyActiveEntry(entry, selected = 0) {
-  state.streamSetId = entry.streamSetId;
-  state.releases = entry.releases;
-  state.selectedRelease = selected;
-}
-
-async function loadStreams() {
-  const list = streamListEl();
-  const subtitle = streamSubtitleEl();
-  if (!state.item) return;
-
-  state.providerCache = {};
-  state.streamSetId = null;
-  state.releases = [];
-  state.selectedRelease = 0;
-  setPlayButtonsEnabled();
-  if (list) list.innerHTML = '<div class="detail-busy"><span class="loading-spinner"></span>Finding available streams…</div>';
-  if (subtitle) subtitle.textContent = 'Checking configured sources…';
-  const request = ++detailRequestNumber;
-  const provider = itemProvider(state.item);
-
-  try {
-    const response = await api(apiUrl('/api/streams', {
-      provider,
-      id: itemId(state.item),
-      season: state.season,
-      episode: state.episode,
-      is_series: state.isSeries,
-    }));
-    if (request !== detailRequestNumber) return;
-    const entry = buildStreamEntry(provider, state.item, response);
-    state.providerCache[provider] = entry;
-    applyActiveEntry(entry);
-    if (subtitle) {
-      const total = entry.releases.length;
-      subtitle.textContent = total
-        ? `${total} stream${total === 1 ? '' : 's'} found — best first`
-        : 'No streams on this server. Play automatically will check the others.';
-    }
-    renderStreams();
-  } catch (error) {
-    if (request !== detailRequestNumber) return;
-    if (subtitle) subtitle.textContent = 'This server could not be reached. Play automatically will try the others.';
-    if (list) list.innerHTML = `<div class="stream-empty stream-error">${escapeHtml(displayUiText(error.message || 'Could not load streams.'))}</div>`;
-  }
-}
-
-function renderStreamRow(release, index) {
-  const quality = release.quality || 'AUTO';
-  const source = providerLabel(release.provider || state.provider);
-  const filename = displayUiText(release.filename || 'Stream');
-  const fields = [release.codec, release.language, prettySize(release.size_bytes)].filter(Boolean);
-  const isSelected = index === state.selectedRelease;
-  const mirrors = release.mirrors?.length ? release.mirrors : [{ label: '' }];
-  const downloads = mirrors.map((mirror, mirrorIndex) => {
-    const mirrorLabel = mirror.label || `Link ${mirrorIndex + 1}`;
-    const text = mirrors.length > 1 ? mirrorLabel : 'Download';
-    return `
-      <button class="stream-download" type="button" data-download-index="${index}" data-mirror-index="${mirrorIndex}" title="Download via ${escapeHtml(mirrorLabel)}" aria-label="Download ${escapeHtml(filename)} via ${escapeHtml(mirrorLabel)}">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14" /></svg>
-        <span class="stream-download-label">${escapeHtml(text)}</span>
-      </button>`;
-  }).join('');
-
-  return `
-    <div class="stream-row ${isSelected ? 'selected' : ''}">
-      <button class="stream-option ${isSelected ? 'selected' : ''}" type="button" data-release-index="${index}">
-        <span class="stream-quality">${escapeHtml(quality)}</span>
-        <span class="stream-main">
-          <span class="stream-name" title="${escapeHtml(filename)}">${escapeHtml(filename)}</span>
-          <span class="stream-sub">${fields.map(escapeHtml).join('<span>·</span>') || 'Ready to play'}</span>
-        </span>
-        <span class="stream-source" title="${escapeHtml(source)}">${escapeHtml(source)}</span>
-        <span class="stream-check">${isSelected ? '✓' : ''}</span>
-      </button>
-      <div class="stream-downloads">${downloads}</div>
-    </div>
-  `;
-}
-
-function renderStreams() {
-  const lists = [streamListEl(), $('#player-stream-list')].filter(Boolean);
-  if (!lists.length) return;
-
-  if (!state.releases.length) {
-    lists.forEach((list) => {
-      list.innerHTML = '<div class="stream-empty">No links on this server yet. Play automatically will check the other servers in order.</div>';
-      list.onclick = onStreamListClick;
-    });
-  } else {
-    const html = state.releases.map(renderStreamRow).join('');
-    lists.forEach((list) => {
-      list.innerHTML = html;
-      list.onclick = onStreamListClick;
-    });
-  }
-  setPlayButtonsEnabled();
-}
-
-// The details page and the legacy dialog both carry a Play button; keep them in sync.
-function setPlayButtonsEnabled() {
-  const enabled = Boolean(state.details) && !state.autoPlaybackActive;
-  $$('#play-selected').forEach((button) => { button.disabled = !enabled; });
-}
-
-function onStreamListClick(event) {
-  const downloadButton = event.target.closest('[data-download-index]');
-  if (downloadButton) {
-    event.preventDefault();
-    downloadRelease(
-      Number(downloadButton.dataset.downloadIndex),
-      Number(downloadButton.dataset.mirrorIndex),
-      downloadButton,
-    );
-    return;
-  }
-  const option = event.target.closest('[data-release-index]');
-  if (!option) return;
-  state.selectedRelease = Number(option.dataset.releaseIndex);
-  renderStreams();
-  if (state.currentRoute === 'player') {
-    // A manual pick overrides whatever automatic run is in progress.
-    state.playbackRunId += 1;
-    state.autoPlaybackActive = false;
-    state.playbackController?.abort();
-    playSelected({ manual: true });
-  }
-}
-
-// --- Server rotation ---
-// Returns the servers in the order they should be tried after `provider`,
-// wrapping around so every server still gets a turn.
-function rotationAfter(provider) {
-  const index = SERVER_ROTATION.indexOf(provider);
-  if (index < 0) return [...SERVER_ROTATION];
-  return [...SERVER_ROTATION.slice(index + 1), ...SERVER_ROTATION.slice(0, index + 1)];
-}
-
-function pickBestMatch(results, title) {
-  const lowerTitle = String(title || '').toLowerCase();
-  const exact = results.find((r) => r.title && r.title.toLowerCase() === lowerTitle);
-  if (exact) return exact;
-  const partial = results.find((r) => r.title && (
-    r.title.toLowerCase().includes(lowerTitle) || lowerTitle.includes(r.title.toLowerCase())
-  ));
-  return partial || results[0];
-}
-
-function buildAttempts(releases, firstIndex = 0) {
-  const attempts = [];
-  const total = releases.length;
-  for (let offset = 0; offset < total; offset += 1) {
-    const releaseIndex = (firstIndex + offset) % total;
-    const mirrorCount = Math.max(1, releases[releaseIndex].mirrors?.length || 1);
-    for (let mirrorIndex = 0; mirrorIndex < mirrorCount; mirrorIndex += 1) {
-      attempts.push({ releaseIndex, mirrorIndex });
-    }
-  }
-  return attempts;
-}
-
-// Loads the streams for this title from one server. The origin server's list is
-// reused; other servers are searched by title first. Returns null when the
-// server has nothing playable for this title.
-async function resolveServerStreams(provider, title) {
-  const cached = state.providerCache[provider];
-  if (cached) return cached.releases.length ? cached : null;
-  try {
-    let item = null;
-    if (state.item && itemProvider(state.item) === provider) {
-      item = state.item;
-    } else {
-      if (!title) return null;
-      const results = await api(apiUrl('/api/search', { q: title, provider, page: 1 }));
-      if (!Array.isArray(results) || !results.length) return null;
-      item = pickBestMatch(results, title);
-    }
-    const response = await api(apiUrl('/api/streams', {
-      provider,
-      id: itemId(item),
-      season: state.season,
-      episode: state.episode,
-      is_series: state.isSeries,
-    }));
-    const entry = buildStreamEntry(provider, item, response);
-    if (!entry.releases.length || !entry.streamSetId) return null;
-    state.providerCache[provider] = entry;
-    return entry;
-  } catch (error) {
-    console.warn(`${provider} has no usable streams for this title:`, error);
-    return null;
-  }
-}
-
-const STATUS_LABELS = {
-  idle: 'Waiting',
-  loading: 'Checking',
-  trying: 'Trying',
-  failed: 'Failed',
-  empty: 'No links',
-  playing: 'Playing',
-};
-
-function setServerStatus(provider, status) {
-  state.serverStatus[provider] = status;
-  renderServerRotation();
-}
-
-function renderServerRotation() {
-  const bar = $('#server-rotation');
-  if (!bar) return;
-  const order = state.serverOrder || [];
-  bar.innerHTML = order.map((provider, index) => {
-    const status = state.serverStatus[provider] || 'idle';
-    const arrow = index < order.length - 1 ? '<span class="server-arrow" aria-hidden="true">→</span>' : '';
-    return `<span class="server-chip is-${status}">
-        <span class="server-step">${index + 1}</span>
-        <span class="server-name">${escapeHtml(providerLabel(provider))}</span>
-        <span class="server-state">${escapeHtml(STATUS_LABELS[status] || status)}</span>
-      </span>${arrow}`;
-  }).join('');
-}
-
-function setPlayerHeader(title, quality, source) {
-  const titleEl = $('#player-page-title') || $('#player-title');
-  const qEl = $('#player-page-quality') || $('#player-quality');
-  const sEl = $('#player-page-source') || $('#player-source');
-  if (titleEl) titleEl.textContent = title;
-  if (qEl) qEl.textContent = String(quality || 'AUTO').toUpperCase();
-  if (sEl) sEl.textContent = source;
-}
-
-function setPlayerStatus(text, busy = false) {
-  const statusEl = $('#player-status');
-  if (statusEl) statusEl.textContent = text;
-  $('#player-control-bar')?.classList.toggle('is-busy', busy);
-}
-
-let toastTimer = 0;
-function showToast(message, tone = 'info') {
-  const toast = $('#toast');
-  if (!toast) return;
-  toast.textContent = message;
-  toast.className = `toast is-visible is-${tone}`;
-  window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => toast.classList.remove('is-visible'), 4200);
-}
-
-function triggerDownload(url, filename) {
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  link.rel = 'noopener';
-  try {
-    if (new URL(url, window.location.href).origin !== window.location.origin) link.target = '_blank';
-  } catch { /* relative or invalid URL: keep default behaviour */ }
-  document.body.append(link);
-  link.click();
-  link.remove();
-}
-
-// Downloads one link (release + mirror) without starting the player.
-async function downloadRelease(releaseIndex, mirrorIndex, button) {
-  const release = state.releases[releaseIndex];
-  if (!release || !state.streamSetId) {
-    showToast('Links are still loading. Try again in a moment.', 'error');
-    return;
-  }
-  const label = button?.querySelector('.stream-download-label');
-  const originalLabel = label?.textContent;
-  if (button) button.disabled = true;
-  if (label) label.textContent = 'Preparing…';
-  try {
-    const playback = await api('/api/play', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        stream_set_id: state.streamSetId,
-        release_index: release.serverIndex ?? releaseIndex,
-        mirror_index: mirrorIndex,
-      }),
-    });
-    const url = playback.playback_url || playback.url;
-    if (!url) throw new Error('This link did not return a downloadable file.');
-    const type = String(playback.stream_type || 'file').toLowerCase();
-    if (type !== 'file') {
-      showToast(`This link is a ${type.toUpperCase()} stream split into segments, so it can't be saved as a single file. Try another link.`, 'warn');
-      return;
-    }
-    const filename = (displayUiText(release.filename) || 'download').replace(/[\\/:*?"<>|]+/g, '_');
-    triggerDownload(url, filename);
-    showToast(`Download started: ${filename}`, 'success');
-  } catch (error) {
-    showToast(displayUiText(error.message || 'Download could not start.'), 'error');
-  } finally {
-    if (button) button.disabled = false;
-    if (label) label.textContent = originalLabel;
-  }
-}
-
-// "Play automatically": tries Sakshi first, then Ritu, then Siddharth, then the
-// rest, one after another. Within each server, every link and mirror is tried
-// before moving on. A manual pick (clicking a link on the player page) tries that
-// link first, then the rest of its server, then the other servers in order.
-async function playSelected(options = {}) {
-  if (state.autoPlaybackActive) return;
-  if (!state.details && !state.item) return;
-
-  const manual = Boolean(options.manual);
-  const chosenRelease = state.selectedRelease;
-  const manualProvider = manual ? itemProvider(state.item) : null;
-  let order;
-  if (manual) order = [manualProvider, ...SERVER_ROTATION.filter((p) => p !== manualProvider)];
-  else if (options.startAfter) order = rotationAfter(options.startAfter);
-  else order = [...SERVER_ROTATION];
-
-  const title = state.details?.title || state.item?.title || 'Now playing';
-  const runId = ++state.playbackRunId;
-  const button = playButtonEl();
-  state.autoPlaybackActive = true;
-  state.serverOrder = order;
-  state.serverStatus = {};
-  state.currentServer = null;
-  if (button) {
-    button.disabled = true;
-    const span = button.querySelector('span');
-    if (span) span.textContent = 'Trying servers…';
-  }
-  if (state.currentRoute !== 'player') {
-    navigate('/watch', false);
-    showPage('player');
-  }
-  if (videoError) videoError.hidden = true;
-  setPlayerHeader(title, 'AUTO', providerLabel(order[0]));
-  renderServerRotation();
-  setPlayerStatus(`Checking ${providerLabel(order[0])} first…`, true);
-
-  let lastError = '';
-  try {
-    for (const provider of order) {
-      if (runId !== state.playbackRunId) return;
-      setServerStatus(provider, 'loading');
-      setPlayerStatus(`Checking ${providerLabel(provider)} for "${title}"…`, true);
-
-      const entry = await resolveServerStreams(provider, title);
-      if (runId !== state.playbackRunId) return;
-      if (!entry) {
-        setServerStatus(provider, 'empty');
-        continue;
-      }
-
-      state.item = entry.item;
-      const firstIndex = manual && provider === manualProvider
-        ? Math.min(Math.max(Number(chosenRelease) || 0, 0), entry.releases.length - 1)
-        : 0;
-      applyActiveEntry(entry, firstIndex);
-      renderStreams();
-
-      const attempts = buildAttempts(entry.releases, firstIndex);
-      const sourceName = providerLabel(provider);
-      let attemptNo = 0;
-      for (const { releaseIndex, mirrorIndex } of attempts) {
-        if (runId !== state.playbackRunId) return;
-        const release = entry.releases[releaseIndex];
-        const quality = String(release.quality || 'AUTO').toUpperCase();
-        attemptNo += 1;
-        state.selectedRelease = releaseIndex;
-        state.currentServer = provider;
-        setServerStatus(provider, 'trying');
-        renderStreams();
-        setPlayerHeader(displayUiText(release.filename || title), quality, sourceName);
-        setPlayerStatus(`Trying ${sourceName} · ${quality} (${attemptNo} of ${attempts.length})…`, true);
-
-        await closeActivePlayer();
-        if (runId !== state.playbackRunId) return;
-
-        try {
-          const playback = await api('/api/play', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              stream_set_id: entry.streamSetId,
-              release_index: release.serverIndex ?? releaseIndex,
-              mirror_index: mirrorIndex,
-            }),
-          });
-          if (runId !== state.playbackRunId) return;
-
-          const result = await openPlayer(playback, title, runId, quality, provider);
-          if (result.played) {
-            state.playbackHistory.push({ provider, quality, title, time: Date.now() });
-            setServerStatus(provider, 'playing');
-            setPlayerStatus(`Now playing on ${sourceName} · ${quality}. If this link doesn't work, download any link below.`, false);
-            return;
-          }
-          if (result.cancelled) return;
-          lastError = result.error?.message || 'This stream could not be started.';
-        } catch (error) {
-          if (runId !== state.playbackRunId) return;
-          lastError = error.message || 'This stream could not be prepared.';
-        }
-        await wait(200);
-      }
-      setServerStatus(provider, 'failed');
-      setPlayerStatus(`${sourceName} has no working link. Moving to the next server…`, true);
-    }
-
-    if (runId === state.playbackRunId) {
-      const detail = lastError ? ` Last error: ${displayUiText(lastError)}` : '';
-      showVideoError(`No server could start this title (${order.map(providerLabel).join(' → ')}).${detail} Try the next server, or download a link below.`);
-      setPlayerStatus('No link could start. Download any link below, or try again.', false);
-    }
-  } finally {
-    if (runId === state.playbackRunId) {
-      state.autoPlaybackActive = false;
-      if (button) {
-        const span = button.querySelector('span');
-        if (span) span.textContent = 'Play automatically';
-      }
-      renderStreams();
-    }
-  }
-}
-
-function createPlaybackMonitor(signal) {
-  let resolvePlayback;
-  let settled = false;
-  let timeoutId = 0;
-  let stableTimeoutId = 0;
-  const promise = new Promise((resolve) => { resolvePlayback = resolve; });
-
-  const finish = (result) => {
-    if (settled) return;
-    settled = true;
-    window.clearTimeout(timeoutId);
-    window.clearTimeout(stableTimeoutId);
-    videoElement.removeEventListener('playing', onPlaying);
-    videoElement.removeEventListener('canplay', onCanPlay);
-    videoElement.removeEventListener('loadeddata', onLoadedData);
-    videoElement.removeEventListener('error', onVideoError);
-    videoElement.removeEventListener('stalled', onStalled);
-    signal.removeEventListener('abort', onAbort);
-    resolvePlayback(result);
-  };
-
-  const confirmStablePlayback = () => {
-    // Wait a bit to ensure playback is stable and not immediately failing
-    // This fixes "playing but still switching" issue
-    stableTimeoutId = window.setTimeout(() => {
-      if (videoElement.readyState >= 2 && !videoElement.paused) {
-        finish({ played: true });
-      } else {
-        // If not really playing, wait for playing event
-      }
-    }, STABLE_PLAYBACK_MS);
-  };
-
-  const onPlaying = () => {
-    // Video started playing, confirm stable after short delay
-    window.clearTimeout(timeoutId);
-    confirmStablePlayback();
-  };
-
-  const onCanPlay = () => {
-    // Can play is also a good indicator, but wait for playing for stability
-    if (videoElement.readyState >= 3) {
-      // Have enough data
-    }
-  };
-
-  const onLoadedData = () => {
-    // Data loaded, but still need playing
-  };
-
-  const onStalled = () => {
-    // Stalled is not necessarily fatal, don't fail immediately
-  };
-
-  const onVideoError = () => {
-    const code = videoElement.error?.code;
-    const message = videoElement.error?.message || '';
-    // Fail fast on error
-    finish({
-      played: false,
-      error: new Error(code ? `Playback error ${code}: ${message}`.trim() : 'The browser could not play this stream.'),
-    });
-  };
-  const onAbort = () => finish({ played: false, cancelled: true });
-
-  videoElement.addEventListener('playing', onPlaying);
-  videoElement.addEventListener('canplay', onCanPlay);
-  videoElement.addEventListener('loadeddata', onLoadedData);
-  videoElement.addEventListener('error', onVideoError);
-  videoElement.addEventListener('stalled', onStalled);
-  signal.addEventListener('abort', onAbort);
-  timeoutId = window.setTimeout(() => {
-    // If video has some data but not playing, consider it as trying
-    if (videoElement.readyState >= 2) {
-      // Has data, wait a bit more for playing
-      timeoutId = window.setTimeout(() => {
-        finish({ played: false, error: new Error('The stream did not start playing before timeout.') });
-      }, 2000);
-    } else {
-      finish({ played: false, error: new Error('The stream did not start before timeout.') });
-    }
-  }, STREAM_START_TIMEOUT_MS);
-  if (signal.aborted) onAbort();
-
-  return {
-    promise,
-    fail(error) {
-      finish({ played: false, error: error instanceof Error ? error : new Error(String(error || 'Stream error')) });
-    },
-    cancel() {
-      finish({ played: false, cancelled: true });
-    },
-  };
-}
-
-async function requestVideoPlayback(signal) {
-  if (signal.aborted) throw new Error('Playback was cancelled.');
-  try {
-    await videoElement.play();
-  } catch (error) {
-    if (error?.name !== 'NotAllowedError' || signal.aborted) throw error;
-
-    const wasMuted = videoElement.muted;
-    videoElement.muted = true;
-    const unmuteAfterStart = () => {
-      if (!wasMuted) videoElement.muted = false;
-    };
-    videoElement.addEventListener('playing', unmuteAfterStart, { once: true });
-    try {
-      await videoElement.play();
-    } catch (mutedError) {
-      videoElement.removeEventListener('playing', unmuteAfterStart);
-      videoElement.muted = wasMuted;
-      throw mutedError;
-    }
-  }
-}
-
-function showVideoError(message) {
-  const msgEl = $('#video-error-message');
-  if (msgEl) msgEl.textContent = displayUiText(message || 'Check that the selected stream is available.');
-  if (videoError) videoError.hidden = false;
-}
-
-async function closeActivePlayer() {
-  if (state.activePlayer) {
-    try { await state.activePlayer.destroy(); } catch { /* Player may already be disposed. */ }
-    state.activePlayer = null;
-  }
-  if (videoElement) {
-    videoElement.pause();
-    videoElement.removeAttribute('src');
-    videoElement.muted = false;
-    videoElement.load();
-  }
-}
-
-async function loadShaka() {
-  if (!shakaModulePromise) {
-    shakaModulePromise = import('shaka-player').then((module) => {
-      const shaka = module.default || module;
-      shaka.polyfill.installAll();
-      return shaka;
-    });
-  }
-  return shakaModulePromise;
-}
-
-async function openPlayer(playback, title, runId, quality, provider) {
-  const playbackUrl = playback.playback_url || playback.url;
-  if (!playbackUrl) return { played: false, error: new Error('The selected source did not return a playable link.') };
-
-  const controller = new AbortController();
-  state.playbackController = controller;
-  const monitor = createPlaybackMonitor(controller.signal);
-  const sourceName = provider ? providerLabel(provider) : displayUiText(playback.source_label || 'STREAM');
-  const playerTitle = $('#player-page-title') || $('#player-title');
-  const qEl = $('#player-page-quality') || $('#player-quality');
-  const sEl = $('#player-page-source') || $('#player-source');
-  if (playerTitle) playerTitle.textContent = displayUiText(playback.title || title);
-  if (qEl) qEl.textContent = String(playback.quality || quality || 'AUTO').toUpperCase();
-  if (sEl) sEl.textContent = sourceName;
-  if (videoError) videoError.hidden = true;
-
-  try {
-    if (controller.signal.aborted || runId !== state.playbackRunId) {
-      monitor.cancel();
-    } else if (playback.stream_type === 'dash' || playback.stream_type === 'hls' || playbackUrl.includes('.mpd') || playbackUrl.includes('.m3u8')) {
-      const shaka = await loadShaka();
-      if (controller.signal.aborted || runId !== state.playbackRunId) {
-        monitor.cancel();
-      } else {
-        const player = new shaka.Player();
-        state.activePlayer = player;
-        // Configure shaka for better audio/video handling
-        player.configure({
-          streaming: {
-            bufferingGoal: 30,
-            rebufferingGoal: 10,
-            bufferBehind: 20,
-            retryParameters: {
-              maxAttempts: 3,
-              baseDelay: 300,
-              backoffFactor: 2,
-            },
-          },
-          manifest: {
-            dash: {
-              ignoreMinBufferTime: true,
-            },
-            hls: {
-              ignoreManifestProgramDateTime: true,
-            },
-          },
-          abr: {
-            enabled: true,
-            defaultBandwidthEstimate: 2000000,
-          },
-        });
-
-        let shakaErrorHandler = null;
-        const cleanupShakaError = () => {
-          if (shakaErrorHandler) {
-            player.removeEventListener('error', shakaErrorHandler);
-            shakaErrorHandler = null;
-          }
-        };
-
-        // Wrap finish to also cleanup shaka listener
-        const originalFinish = monitor.fail;
-        // We'll handle shaka errors separately
-        shakaErrorHandler = (event) => {
-          const detail = event.detail;
-          const isCritical = detail?.severity == null
-            || detail.severity === shaka.util?.Error?.Severity?.CRITICAL
-            || detail.severity === 2;
-          // Only fail on critical errors, and only if not already playing stably
-          if (isCritical) {
-            // If video is already playing stably, don't fail - let it continue
-            if (videoElement.readyState >= 3 && !videoElement.paused && videoElement.currentTime > 1) {
-              console.warn('Shaka non-fatal error during stable playback:', detail?.message);
-              return;
-            }
-            monitor.fail(new Error(detail?.message || `Stream error ${detail?.code || ''}`.trim()));
-            cleanupShakaError();
-          }
-        };
-        player.addEventListener('error', shakaErrorHandler);
-
-        // Ensure cleanup when monitor settles
-        monitor.promise.then(() => cleanupShakaError()).catch(() => cleanupShakaError());
-
-        const setupPromise = (async () => {
-          await player.attach(videoElement);
-          if (controller.signal.aborted || runId !== state.playbackRunId) return;
-          await player.load(playbackUrl);
-        })();
-        const setupResult = await Promise.race([
-          setupPromise.then(() => ({ ready: true }), (error) => ({ error })),
-          monitor.promise.then((result) => ({ result })),
-        ]);
-        if (setupResult.result) {
-          // The stream failed, timed out, or was cancelled while Shaka was loading it.
-        } else if (setupResult.error) {
-          monitor.fail(setupResult.error);
-        } else if (!controller.signal.aborted && runId === state.playbackRunId) {
-          requestVideoPlayback(controller.signal).catch((error) => monitor.fail(error));
-        }
-      }
-    } else {
-      if (videoElement) {
-        videoElement.src = playbackUrl;
-        videoElement.load();
-      }
-      requestVideoPlayback(controller.signal).catch((error) => monitor.fail(error));
-    }
-  } catch (error) {
-    monitor.fail(error);
-  }
-
-  const result = await monitor.promise;
-  if (state.playbackController === controller) state.playbackController = null;
-  if (!result.played) {
-    controller.abort();
-    await closeActivePlayer();
-  }
-  return result;
-}
-
-function syncProvider(provider) {
-  state.provider = provider;
-  if (providerSelect) providerSelect.value = provider;
-  $$('.source-shortcut').forEach((button) => {
-    const isSelected = button.dataset.provider === provider;
-    button.classList.toggle('selected', isSelected);
-    const oldCheck = $('.source-check', button);
-    if (oldCheck) oldCheck.remove();
-    if (isSelected) {
-      const check = document.createElement('span');
-      check.className = 'source-check';
-      check.textContent = '✓';
-      button.append(check);
-    }
-  });
-}
-
-// Event listeners
-if (searchForm) {
-  searchForm.addEventListener('submit', (event) => {
-    event.preventDefault();
-    runSearch(searchInput?.value || '');
-  });
-}
-
-if (searchInput) {
-  searchInput.addEventListener('input', () => {
-    const clearButton = $('#clear-search');
-    if (clearButton) clearButton.classList.toggle('visible', Boolean(searchInput.value));
-    clearTimeout(searchTimer);
-    state.requestNumber += 1;
-    if (!searchInput.value.trim()) {
-      navigate('/', true);
-      loadDiscover();
-      return;
-    }
-    searchTimer = window.setTimeout(() => runSearch(searchInput.value), 340);
-  });
-}
-
-const clearSearchBtn = $('#clear-search');
-if (clearSearchBtn) {
-  clearSearchBtn.addEventListener('click', () => {
-    if (searchInput) searchInput.value = '';
-    clearSearchBtn.classList.remove('visible');
-    if (searchInput) searchInput.focus();
-    navigate('/', true);
-    loadDiscover();
-  });
-}
-
-if (providerSelect) {
-  providerSelect.addEventListener('change', () => {
-    syncProvider(providerSelect.value);
-    if (searchInput?.value.trim()) runSearch(searchInput.value);
-    else if (state.provider === 'moviebox') loadDiscover();
-    else setEmptyMessage('Search this source.', `Enter a title to search ${providerLabel(state.provider)}.`);
-  });
-}
-
-$$('.source-shortcut').forEach((button) => {
-  button.addEventListener('click', () => {
-    syncProvider(button.dataset.provider);
-    if (searchInput?.value.trim()) runSearch(searchInput.value);
-    else if (state.provider === 'moviebox') loadDiscover();
-    else setEmptyMessage('Search this source.', `Enter a title to search ${providerLabel(state.provider)}.`);
-    const area = $('#search-area');
-    if (area) area.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  });
+api.onEngineChange(({ engine, version }) => {
+  const badge = document.querySelector('#engine-status');
+  const label = document.querySelector('#engine-status-text');
+  if (badge) badge.dataset.state = engine;
+  if (label) label.textContent = version ? `${ENGINE_LABELS[engine]} · v${version}` : ENGINE_LABELS[engine];
 });
 
-$$('.quick-searches button').forEach((button) => {
-  button.addEventListener('click', () => {
-    if (searchInput) searchInput.value = button.dataset.query;
-    const clearBtn = $('#clear-search');
-    if (clearBtn) clearBtn.classList.add('visible');
-    runSearch(button.dataset.query);
-    if (searchInput) searchInput.focus();
+library.subscribe(() => {
+  document.dispatchEvent(new CustomEvent('ifallhub:library-changed'));
+});
+
+// --- Routing ---------------------------------------------------------------
+
+onRoute(async (route) => {
+  activeRoute = route;
+  const previous = view.dataset.view;
+  if (previous === 'watch' && route.name !== 'watch') await stopPlayback();
+
+  updateNav(route);
+  view.dataset.view = route.name;
+
+  if (route.name === 'home') await renderHome(view, route);
+  else if (route.name === 'search' || route.name === 'genre') {
+    if (route.name === 'genre') {
+      route.query.set('q', route.params.genre);
+      searchInput.value = route.params.genre;
+    }
+    await renderBrowse(view, route);
+    if (route.name === 'search' && route.query.get('q')) searchFromRoute(route);
+  } else if (route.name === 'details') await renderDetails(view, route);
+  else if (route.name === 'watch') await renderWatch(view, route);
+  else if (route.name === 'mylist') await renderMyList(view, route);
+  else if (route.name === 'tracker') await renderTracker(view, route);
+  else await renderHome(view, route);
+
+  window.scrollTo({ top: 0, behavior: route.name === 'home' ? 'smooth' : 'auto' });
+});
+
+function updateNav(route) {
+  document.querySelectorAll('[data-nav-item]').forEach((item) => {
+    const target = item.dataset.navItem;
+    const active =
+      target === route.name ||
+      (target === 'search' && route.name === 'genre') ||
+      (target === 'home' && !['home', 'search', 'genre', 'mylist', 'tracker'].includes(route.name));
+    item.classList.toggle('is-active', active);
   });
-});
-
-const retryBtn = $('#retry-button');
-if (retryBtn) retryBtn.addEventListener('click', () => runSearch(searchInput?.value || ''));
-const helpBtn = $('#help-button');
-if (helpBtn) helpBtn.addEventListener('click', () => $('#help-dialog')?.showModal());
-const sidebarMusic = $('#sidebar-music');
-if (sidebarMusic) sidebarMusic.addEventListener('click', () => $('#music-dialog')?.showModal());
-const musicBtn = $('#music-button');
-if (musicBtn) musicBtn.addEventListener('click', () => $('#music-dialog')?.showModal());
-const sidebarSearch = $('#sidebar-search');
-if (sidebarSearch) sidebarSearch.addEventListener('click', (e) => {
-  e.preventDefault();
-  navigate('/', false);
-  setTimeout(() => searchInput?.focus(), 100);
-});
-
-document.addEventListener('click', (event) => {
-  const close = event.target.closest('[data-close]');
-  if (!close) return;
-  if (close.dataset.close === 'details') {
-    if (state.currentRoute === 'details') navigate('/', false);
-    else detailsDialog?.close();
+  const crumb = document.querySelector('#crumb-current');
+  if (crumb) {
+    crumb.textContent =
+      route.name === 'details' || route.name === 'watch'
+        ? app.details?.title || 'Title'
+        : { home: 'Discover', search: 'Search', genre: 'Genre', mylist: 'My List', tracker: 'Tracker' }[route.name] || 'Discover';
   }
-  if (close.dataset.close === 'player') {
-    if (state.currentRoute === 'player') {
-      if (state.item) navigate(`/title/${encodeURIComponent(itemProvider(state.item))}/${encodeURIComponent(itemId(state.item))}`, false);
-      else navigate('/', false);
-    } else playerDialog?.close();
+  const count = document.querySelector('#nav-list-count');
+  if (count) {
+    const total = library.state.watchlist.length;
+    count.textContent = total ? String(total) : '';
+    count.hidden = !total;
   }
-  if (close.dataset.close === 'help') $('#help-dialog')?.close();
-  if (close.dataset.close === 'music') $('#music-dialog')?.close();
-  if (close.dataset.close === 'access') $('#access-dialog')?.close();
-});
+}
 
-// Handle SPA navigation via data-nav
-document.addEventListener('click', (event) => {
-  const navLink = event.target.closest('a[data-nav]');
-  if (!navLink) return;
-  const href = navLink.getAttribute('href');
-  if (!href || href.startsWith('#') || href.startsWith('http')) return;
+// --- Search ----------------------------------------------------------------
+
+searchForm?.addEventListener('submit', (event) => {
   event.preventDefault();
-  navigate(href, false);
+  const term = searchInput.value.trim();
+  navigate(term ? `/search?q=${encodeURIComponent(term)}&provider=${encodeURIComponent(app.provider)}` : '/');
 });
 
-for (const dialog of [detailsDialog, playerDialog, $('#help-dialog'), $('#music-dialog'), $('#access-dialog')]) {
-  dialog?.addEventListener('click', (event) => {
-    if (event.target === dialog) dialog.close();
-  });
-}
-
-const detailsBackBtn = $('#details-back-button');
-if (detailsBackBtn) detailsBackBtn.addEventListener('click', () => navigate('/', false));
-const playerBackBtn = $('#player-back-button');
-if (playerBackBtn) playerBackBtn.addEventListener('click', () => {
-  state.playbackRunId += 1;
-  state.autoPlaybackActive = false;
-  state.playbackController?.abort();
-  state.playbackController = null;
-  closeActivePlayer();
-  if (state.item) navigate(`/title/${encodeURIComponent(itemProvider(state.item))}/${encodeURIComponent(itemId(state.item))}`, false);
-  else navigate('/', false);
+searchInput?.addEventListener('input', () => {
+  const clear = document.querySelector('#clear-search');
+  if (clear) clear.hidden = !searchInput.value;
 });
 
-const videoRetryBtn = $('#video-retry-button');
-if (videoRetryBtn) videoRetryBtn.addEventListener('click', () => {
-  // Continue the rotation after the server that failed last, wrapping around.
-  state.playbackRunId += 1;
-  state.autoPlaybackActive = false;
-  playSelected({ startAfter: state.currentServer || undefined });
+document.querySelector('#clear-search')?.addEventListener('click', () => {
+  searchInput.value = '';
+  document.querySelector('#clear-search').hidden = true;
+  navigate('/');
 });
 
-// Handle browser back/forward
-window.addEventListener('popstate', () => {
-  handleRoute();
+bindSearchSuggestions(searchInput, searchList);
+
+// --- Global card actions ---------------------------------------------------
+
+document.addEventListener('click', async (event) => {
+  const navLink = event.target.closest('a[data-nav]');
+  if (navLink) {
+    const href = navLink.getAttribute('href');
+    if (href && href.startsWith('/') && !href.startsWith('//')) {
+      event.preventDefault();
+      navigate(href);
+      return;
+    }
+  }
+
+  if (event.target.closest('[data-focus-search]')) {
+    event.preventDefault();
+    searchInput?.focus();
+    return;
+  }
+
+  const card = event.target.closest('[data-card]');
+  if (!card) return;
+  const provider = card.dataset.provider || app.provider;
+  const id = card.dataset.id;
+
+  const watchlistButton = event.target.closest('[data-watchlist]');
+  if (watchlistButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    const listed = await library.toggleWatchlist({
+      provider,
+      id,
+      title: card.dataset.title,
+      poster_url: card.dataset.poster || null,
+      year: card.dataset.year || null,
+      media_type: card.dataset.type || 'movie',
+    });
+    watchlistButton.dataset.watchlist = listed ? '1' : '0';
+    watchlistButton.innerHTML = listed
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" /></svg>'
+      : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>';
+    watchlistButton.title = listed ? 'Remove from My List' : 'Add to My List';
+    toast(listed ? `Added “${card.dataset.title}” to My List` : 'Removed from My List', listed ? 'success' : 'info');
+    updateNav(activeRoute);
+    return;
+  }
+
+  const playButton = event.target.closest('[data-play]');
+  if (playButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    navigate(watchPath(provider, id));
+    return;
+  }
+
+  const clearProgress = event.target.closest('[data-clear-progress]');
+  if (clearProgress) {
+    event.preventDefault();
+    event.stopPropagation();
+    await library.updateProgress({ provider, id, title: card.dataset.title }, { remove: true });
+    return;
+  }
+
+  if (event.target.closest('[data-open]') || event.target === card || card.contains(event.target)) {
+    if (event.target.closest('button, a, input, select')) return;
+    navigate(titlePath(provider, id));
+  }
 });
 
-window.addEventListener('keydown', (event) => {
+document.addEventListener('keydown', (event) => {
+  const card = event.target.closest?.('[data-card]');
+  if (card && (event.key === 'Enter' || event.key === ' ')) {
+    event.preventDefault();
+    navigate(titlePath(card.dataset.provider || app.provider, card.dataset.id));
+  }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault();
-    if (state.currentRoute !== 'home') navigate('/', false);
-    setTimeout(() => {
-      searchInput?.focus();
-      searchInput?.select();
-    }, 100);
-  }
-  if (event.key === 'Escape') {
-    if (state.currentRoute === 'player') {
-      state.playbackRunId += 1;
-      state.autoPlaybackActive = false;
-      state.playbackController?.abort();
-      closeActivePlayer();
-      if (state.item) navigate(`/title/${encodeURIComponent(itemProvider(state.item))}/${encodeURIComponent(itemId(state.item))}`, false);
-      else navigate('/', false);
-    } else if (state.currentRoute === 'details') {
-      navigate('/', false);
-    }
+    if (activeRoute.name !== 'search') navigate('/');
+    window.setTimeout(() => searchInput?.focus(), 80);
   }
 });
 
-// Initial load
-checkEngine();
-handleRoute();
+document.querySelector('[data-retry]')?.addEventListener('click', () => {
+  if (activeRoute.name === 'search') runSearch();
+  else handleRoute();
+});
+
+// --- Access key ------------------------------------------------------------
+
+window.addEventListener('ifallhub:access-needed', () => {
+  const dialog = document.querySelector('#access-dialog');
+  if (dialog && !dialog.open) dialog.showModal();
+});
+
+document.querySelector('#access-form')?.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const input = document.querySelector('#access-input');
+  api.setAccessKey(input.value.trim());
+  input.value = '';
+  document.querySelector('#access-dialog')?.close();
+  toast('Access key saved', 'success');
+  handleRoute();
+});
+
+document.querySelectorAll('[data-close]').forEach((button) => {
+  button.addEventListener('click', () => button.closest('dialog')?.close());
+});
+
+document.querySelector('#help-button')?.addEventListener('click', () => {
+  document.querySelector('#help-dialog')?.showModal();
+});
+document.querySelector('#music-button')?.addEventListener('click', () => {
+  document.querySelector('#music-dialog')?.showModal();
+});
+document.querySelector('#sidebar-music')?.addEventListener('click', () => {
+  document.querySelector('#music-dialog')?.showModal();
+});
+
+// --- Provider switcher -----------------------------------------------------
+
+async function loadProviders() {
+  try {
+    const providers = await api.providers();
+    if (Array.isArray(providers) && providers.length) app.providers = providers;
+  } catch {
+    app.providers = [];
+  }
+  const stack = document.querySelector('#source-stack');
+  if (!stack) return;
+  const list = app.providers.length
+    ? app.providers
+    : [{ id: 'moviebox', name: 'Siddharth' }];
+  stack.innerHTML = list
+    .map(
+      (entry) => `
+      <button class="source-shortcut ${entry.id === app.provider ? 'is-active' : ''}" type="button" data-provider="${escapeHtml(entry.id)}">
+        <span class="source-dot ${escapeHtml(entry.id)}-dot"></span>
+        <span>${escapeHtml(providerLabel(entry.id))}</span>
+      </button>`,
+    )
+    .join('');
+  stack.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-provider]');
+    if (!button) return;
+    app.provider = button.dataset.provider;
+    stack.querySelectorAll('[data-provider]').forEach((entry) => {
+      entry.classList.toggle('is-active', entry === button);
+    });
+    const providerSelect = document.querySelector('#filter-provider');
+    if (providerSelect) providerSelect.value = app.provider;
+    if (activeRoute.name === 'search' && searchInput?.value.trim()) runSearch();
+    else if (activeRoute.name === 'search') navigate('/');
+    toast(`Source: ${providerLabel(app.provider)}`, 'info');
+  });
+}
+
+// --- Live updates ----------------------------------------------------------
+
+onMeta(() => applyMetaToDom(view));
+
+document.addEventListener('ifallhub:library-changed', () => {
+  updateNav(activeRoute);
+  if (['mylist', 'tracker'].includes(activeRoute.name)) handleRoute();
+  if (activeRoute.name === 'home') {
+    const rails = document.querySelector('#home-rails');
+    if (rails) handleRoute();
+  }
+  applyMetaToDom(view);
+});
+
+// --- Boot ------------------------------------------------------------------
+
+async function boot() {
+  await api.checkEngine();
+  await Promise.all([loadProviders(), library.start()]);
+  updateNav(activeRoute);
+  await startRouter();
+  // Warm the metadata cache for whatever is on screen.
+  window.setTimeout(() => ensureMeta(app.pool.slice(0, 36)), 400);
+}
+
+boot();

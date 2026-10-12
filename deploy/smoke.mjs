@@ -43,13 +43,29 @@ async function get(path, headers = {}) {
   return { status: response.status, text, json };
 }
 
+async function post(path, body, headers = {}) {
+  const response = await fetch(base + path, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    /* not JSON */
+  }
+  return { status: response.status, text, json };
+}
+
 async function main() {
   // 1. Homepage (static build).
   {
     const response = await fetch(base + '/', { redirect: 'follow' });
     const html = await response.text();
     note(
-      response.status === 200 && /moviebox/i.test(html),
+      response.status === 200 && /ifallhub|moviebox/i.test(html),
       'homepage serves the web player',
       `status=${response.status}`,
     );
@@ -116,7 +132,139 @@ async function main() {
     );
   }
 
-  // 7. Optional end-to-end playback attempt.
+  // 7. Library: watchlist, progress and ratings persist on the server.
+  {
+    const headers = token ? { 'X-MovieBox-Key': token } : {};
+    const initial = await get('/api/library', headers);
+    const shape =
+      initial.status === 200 &&
+      Array.isArray(initial.json?.watchlist) &&
+      Array.isArray(initial.json?.progress) &&
+      Array.isArray(initial.json?.ratings) &&
+      typeof initial.json?.version === 'number';
+    note(shape, '/api/library returns the library shape', `status=${initial.status}`);
+
+    const entry = {
+      provider: 'moviebox',
+      id: 'smoke-test-title',
+      title: 'Smoke Test Title',
+      year: '2024',
+      media_type: 'movie',
+      official_rating: 8.4,
+    };
+    const added = await post('/api/library/watchlist', entry, headers);
+    const listed =
+      added.status === 200 &&
+      added.json?.listed === true &&
+      (added.json?.watchlist || []).some((item) => item.id === 'smoke-test-title');
+    note(listed, 'POST /api/library/watchlist saves an entry', `status=${added.status}`);
+    note(
+      (added.json?.version || 0) > (initial.json?.version || 0),
+      'watchlist mutation bumps the library version',
+      `version=${added.json?.version}`,
+    );
+
+    const progress = await post(
+      '/api/library/progress',
+      { ...entry, season: 0, episode: 0, position_seconds: 600, duration_seconds: 6000 },
+      headers,
+    );
+    const tracked =
+      progress.status === 200 &&
+      (progress.json?.progress || []).some(
+        (item) => item.id === 'smoke-test-title' && item.position_seconds === 600,
+      );
+    note(tracked, 'POST /api/library/progress stores the resume point', `status=${progress.status}`);
+
+    const rated = await post('/api/library/rating', { ...entry, rating: 9 }, headers);
+    const hasRating = (rated.json?.ratings || []).some(
+      (item) => item.id === 'smoke-test-title' && item.rating === 9,
+    );
+    note(hasRating, 'POST /api/library/rating stores a 1-10 score', `status=${rated.status}`);
+
+    const unrate = await post('/api/library/rating', { ...entry, rating: 0 }, headers);
+    note(
+      !(unrate.json?.ratings || []).some((item) => item.id === 'smoke-test-title'),
+      'rating 0 removes the score',
+      `status=${unrate.status}`,
+    );
+
+    const cleared = await post('/api/library/clear', { scope: 'watchlist' }, headers);
+    const removed =
+      cleared.status === 200 && !(cleared.json?.watchlist || []).some((item) => item.id === 'smoke-test-title');
+    note(removed, 'POST /api/library/clear clears one scope', `status=${cleared.status}`);
+    await post('/api/library/clear', { scope: 'progress' }, headers);
+
+    const rejected = await post('/api/library/watchlist', { provider: 'not-a-source', id: 'x' }, headers);
+    note(rejected.status === 400, 'library rejects unknown providers', `status=${rejected.status}`);
+  }
+
+  // 8. Live library sync (server-sent events).
+  {
+    const headers = token ? { 'X-MovieBox-Key': token, Accept: 'text/event-stream' } : { Accept: 'text/event-stream' };
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      const response = await fetch(`${base}/api/library/events`, { headers, signal: controller.signal });
+      const isStream =
+        response.status === 200 && String(response.headers.get('content-type') || '').includes('text/event-stream');
+      let firstFrame = '';
+      if (isStream) {
+        const reader = response.body.getReader();
+        const { value } = await reader.read();
+        firstFrame = new TextDecoder().decode(value || new Uint8Array());
+        reader.cancel().catch(() => {});
+      }
+      clearTimeout(timer);
+      controller.abort();
+      note(
+        isStream && firstFrame.includes('event: library') && firstFrame.includes('"version"'),
+        '/api/library/events streams the library',
+        `status=${response.status} frame=${firstFrame.slice(0, 60).replace(/\n/g, ' ')}`,
+      );
+    } catch (error) {
+      note(false, '/api/library/events streams the library', String(error).slice(0, 140));
+    }
+  }
+
+  // 9. Discovery extras: carousels, autocomplete, related titles and card meta.
+  {
+    const headers = token ? { 'X-MovieBox-Key': token } : {};
+    const empty = await get('/api/suggest?q=', headers);
+    note(
+      empty.status === 200 && Array.isArray(empty.json?.suggestions),
+      '/api/suggest handles an empty term',
+      `status=${empty.status}`,
+    );
+
+    const noIds = await get('/api/meta?provider=moviebox', headers);
+    note(
+      noIds.status === 200 && noIds.json?.meta && Object.keys(noIds.json.meta).length === 0,
+      '/api/meta returns an empty map without ids',
+      `status=${noIds.status}`,
+    );
+
+    const badRelated = await get('/api/related?provider=moviebox&id=', headers);
+    note(badRelated.status === 400, '/api/related requires a title id', `status=${badRelated.status}`);
+
+    const collections = await get('/api/collections?limit=8&pages=1', headers);
+    if (collections.status === 200) {
+      const rows = collections.json?.rows || [];
+      note(
+        rows.length > 0 && rows.every((row) => Array.isArray(row.items)),
+        '/api/collections returns ranked rows',
+        rows.map((row) => `${row.key}:${row.items.length}`).join(' ') || `status=${collections.status}`,
+      );
+    } else {
+      note(
+        collections.status >= 500 && collections.json?.error,
+        '/api/collections routed to the catalog (provider unreachable from this host)',
+        `status=${collections.status} error=${String(collections.json?.error || '').slice(0, 90)}`,
+      );
+    }
+  }
+
+  // 10. Optional end-to-end playback attempt.
   if (real && !mock) {
     const headers = token ? { 'X-MovieBox-Key': token, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
     try {

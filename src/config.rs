@@ -220,6 +220,11 @@ pub fn favorites_path() -> Option<PathBuf> {
     data_dir().map(|dir| dir.join("favorites.json"))
 }
 
+/// Watchlist / progress / ratings store used by the web client.
+pub fn web_library_path() -> Option<PathBuf> {
+    data_dir().map(|dir| dir.join("web_library.json"))
+}
+
 pub fn rotate_corrupt_file(path: &std::path::Path, label: &str) {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

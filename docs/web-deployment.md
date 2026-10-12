@@ -28,6 +28,9 @@ browser ──► deploy/server.mjs ── 0.0.0.0:$PORT (public)
 - The Rust API is spawned internally on `127.0.0.1:8787` and is never exposed.
 - `/api/media/*` streams HLS/DASH manifests, media segments, and byte-range
   responses through without buffering video on the server.
+- `/api/library/events` is a server-sent-events stream (watchlist/progress/rating
+  updates). The proxy disables retries, idle timeouts and buffering for it, so
+  browsers stay live-synced without polling.
 
 ## Deploy with the Render Blueprint
 
@@ -57,10 +60,21 @@ All configuration is environment-only. Secrets belong in the Render dashboard
 | `MOVIEBOX_WEB_API_RATE_PER_MIN` | `120` | Per-client request budget inside the Rust API (`0` disables). |
 | `MOVIEBOX_WEB_RATE_LIMIT` | `120` | Edge rate limit for `/api/*` per client per minute (`0` disables). |
 | `MOVIEBOX_WEB_MEDIA_RATE_LIMIT` | `600` | Edge rate limit for `/api/media/*` segments (`0` disables). |
+| `MOVIEBOX_DATA_DIR` | platform default | Data directory. The web library (watchlist, resume progress, personal ratings) is stored here as `web_library.json`. Mount a volume to keep it across deploys. |
 | `MOVIEBOX_API_ADDR` | `127.0.0.1:8787` | Loopback address of the spawned Rust API. |
 | `MOVIEBOX_WEB_ROOT` | `web/dist` | Static asset root inside the container. |
 | `MOVIEBOX_LOG` | `info` | Rust log level (`off`…`trace`). |
 | `MOVIEBOX_FOURKHDHUB_URL` | unset | Custom 4KHDHub base URL (same as the TUI). |
+
+### Web library and live sync
+
+`GET/POST /api/library*` store the watchlist, resume points and 1-10 personal
+ratings on the server, so one deployment keeps the same library across browsers
+and devices. `GET /api/library/events` pushes every change to connected clients.
+`EventSource` cannot send custom headers, so on a token-protected deployment the
+browser authenticates the event stream with the `moviebox_key` cookie (the API
+already accepts that cookie form); without it the client falls back to polling
+`/api/library` every 8 seconds.
 
 ### Access protection
 
