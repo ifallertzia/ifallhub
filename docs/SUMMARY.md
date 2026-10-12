@@ -29,6 +29,7 @@
 
 - [Testing Suite](testing.md)
 - [Debugging Guide](debugging.md)
+- [Playback Links & Errors](playback-links.md)
 - [Release Checklist](release-checklist.md)
 - [Known Issues](known-issues.md)
 - [Contributing Guide](contributing.md)

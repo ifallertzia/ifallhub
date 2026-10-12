@@ -145,6 +145,12 @@ node deploy/smoke.mjs --base http://127.0.0.1:3000 --token devkey --real
 - **Search returns 502** - the provider was unreachable from the service;
   providers occasionally block datacenter IPs. Try again later or configure
   `MOVIEBOX_FOURKHDHUB_URL`/add-ons.
+- **"Playback error" / video never starts** - usually an HEVC (`hvc1`/`hev1`)
+  DASH stream or a `.mkv` direct link, which browsers cannot decode, followed by
+  expired signed cookies (`403` from the CDN) and mis-copied provider headers.
+  Diagnose with `python3 scripts/check_playback_links.py`; the full cause table
+  and every link the player uses are in
+  [`playback-links.md`](playback-links.md).
 
 ## Scope and compliance
 

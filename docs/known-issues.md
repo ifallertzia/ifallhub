@@ -19,6 +19,14 @@ Tracked here so future work and issue reports reference the same facts.
 - **Termux playback depends on Android intent dispatchers**: Verify `termux-open` / `am` availability and the Android player chooser behavior on target devices.
 - **Windows 11 Smart App Control (SAC) restricts untrusted web downloads.** Unsigned binaries downloaded via web browsers are tagged with `ZoneId=3` (Mark of the Web), causing Windows 11 SAC to block launch without a standard "Run anyway" button. The official installer (`install.ps1`) strips this tag automatically using `Unblock-File`. For manual ZIP downloads, users must unblock via file properties or `Unblock-File moviebox-tui.exe`.
 
+- **Browser playback of provider streams depends on codec and container.** MovieBox
+  DASH paths are frequently HEVC/H.265 (`_h265_`), which Chromium and Firefox cannot
+  decode (`shaka` error 4032 `CONTENT_UNSUPPORTED_BY_BROWSER`), and several 4KHDHub
+  mirrors serve `.mkv`. Play those titles in `mpv`/VLC via the TUI, or pick an
+  H.264 (`avc1`) release. The complete link inventory and the ranked cause list for
+  "playback error" live in [`playback-links.md`](playback-links.md), with the
+  ready-to-run tester `scripts/check_playback_links.py`.
+
 ## Verification
 
 - Automated testing is enforced via `cargo test --all-features --locked` covering 530 unit and integration tests across 12 test suites (see [`docs/testing.md`](testing.md)). The count is updated when tests change; it does not replace real-player and real-device verification.
