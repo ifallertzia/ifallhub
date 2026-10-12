@@ -207,7 +207,11 @@ function makeMockApiPlugin(enabled) {
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), 'MOVIEBOX_');
-  const apiTarget = env.MOVIEBOX_API_URL || process.env.MOVIEBOX_API_URL;
+  const ifallhubEnv = loadEnv(mode, process.cwd(), 'IFALLHUB_');
+  const apiTarget = ifallhubEnv.IFALLHUB_API_URL
+    || process.env.IFALLHUB_API_URL
+    || env.MOVIEBOX_API_URL
+    || process.env.MOVIEBOX_API_URL;
   return {
     plugins: [makeMockApiPlugin(!apiTarget)],
     server: {

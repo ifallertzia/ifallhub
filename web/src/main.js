@@ -15,6 +15,9 @@ const state = {
   episode: 0,
   isSeries: false,
   activePlayer: null,
+  playbackRunId: 0,
+  playbackController: null,
+  autoPlaybackActive: false,
   discoverItems: [],
   requestNumber: 0,
 };
@@ -38,6 +41,7 @@ const videoElement = $('#video-element');
 const videoError = $('#video-error-overlay');
 let searchTimer = 0;
 let detailRequestNumber = 0;
+const STREAM_START_TIMEOUT_MS = 15_000;
 
 function escapeHtml(value = '') {
   return String(value).replace(/[&<>"']/g, (char) => ({
@@ -156,7 +160,7 @@ function setError(title, message) {
   resultsGrid.hidden = true;
   errorState.hidden = false;
   $('#error-title').textContent = title;
-  $('#error-message').textContent = message;
+  $('#error-message').textContent = displayUiText(message);
   resultCount.textContent = '';
 }
 
@@ -225,7 +229,7 @@ function renderCards(items) {
         <div class="movie-poster" style="--poster-glow: hsla(${hue}, 64%, 57%, .55); --poster-top: hsl(${hue}, 23%, 27%);">
           ${poster}
           <div class="poster-fallback" ${cover ? 'hidden' : ''}>
-            <span class="fallback-top">MOVIEBOX · ${escapeHtml(sourceName.toUpperCase())}</span>
+            <span class="fallback-top">IFALLHUB · ${escapeHtml(sourceName.toUpperCase())}</span>
             <div class="fallback-art"><span>${escapeHtml(title.trim().slice(0, 1).toUpperCase())}</span></div>
             <span class="fallback-bottom">${escapeHtml(title)}</span>
           </div>
@@ -265,14 +269,26 @@ function renderCards(items) {
 }
 
 function providerLabel(provider) {
-  return ({
-    moviebox: 'MovieBox',
-    fourkhdhub: '4KHDHub',
-    dramachi: 'Dramachi',
-    bdix_circleftp: 'CircleFTP',
-    bdix_dhakaflix: 'DhakaFlix',
-    addons: 'Add-ons',
-  })[provider] || provider || 'Source';
+  const key = String(provider || '').trim().toLowerCase();
+  const labels = {
+    moviebox: 'Siddharth',
+    fourkhdhub: 'Ritu',
+    dramachi: 'Sakshi',
+    bdix_circleftp: 'Shreya',
+    bdix_dhakaflix: 'Everyone',
+    addons: 'Ifallhub',
+  };
+  return labels[key] || displayUiText(provider) || 'Source';
+}
+
+function displayUiText(value = '') {
+  return String(value)
+    .replace(/\bmovie\s*box(?:-tui)?\b/gi, 'Ifallhub')
+    .replace(/\b4k\s*hd\s*hub\b/gi, 'Ritu')
+    .replace(/\bdrama\s*chi\b/gi, 'Sakshi')
+    .replace(/\bcircle\s*ftp(?:\s*\(bdix\))?\b/gi, 'Shreya')
+    .replace(/\bdhaka\s*flix(?:\s*\(bdix\))?\b/gi, 'Everyone')
+    .replace(/\bcommunity\s*add[ -]?ons?\b/gi, 'Ifallhub');
 }
 
 function renderDiscover(items) {
@@ -361,7 +377,7 @@ async function openDetails(item) {
     if (request !== detailRequestNumber) return;
     detailsContent.innerHTML = `
       <button class="dialog-close" type="button" data-close="details" aria-label="Close details">×</button>
-      <div class="details-loading"><div class="error-mark">!</div><span>${escapeHtml(error.message || 'Could not load title details.')}</span></div>
+      <div class="details-loading"><div class="error-mark">!</div><span>${escapeHtml(displayUiText(error.message || 'Could not load title details.'))}</span></div>
     `;
   }
 }
@@ -383,7 +399,7 @@ function renderDetails(details) {
   const genres = (details.genres || []).slice(0, 5).map((genre) => `<span class="genre-chip">${escapeHtml(genre)}</span>`).join('');
   const cover = poster
     ? `<img src="${escapeHtml(poster)}" alt="${escapeHtml(title)} poster" />`
-    : `<div class="poster-fallback"><span class="fallback-top">MOVIEBOX WEB</span><div class="fallback-art"><span>${escapeHtml(title.slice(0, 1))}</span></div><span class="fallback-bottom">${escapeHtml(title)}</span></div>`;
+    : `<div class="poster-fallback"><span class="fallback-top">IFALLHUB WEB</span><div class="fallback-art"><span>${escapeHtml(title.slice(0, 1))}</span></div><span class="fallback-bottom">${escapeHtml(title)}</span></div>`;
   const seasonOptions = (details.seasons || []).map((season) =>
     `<option value="${Number(season.number)}" ${Number(season.number) === Number(state.season) ? 'selected' : ''}>Season ${Number(season.number)}</option>`,
   ).join('');
@@ -423,9 +439,9 @@ function renderDetails(details) {
       </div>
       <div class="stream-list" id="stream-list"><div class="detail-busy"><span class="loading-spinner"></span>Finding available streams…</div></div>
       <div class="stream-actions">
-        <div class="stream-note">Streams are resolved by your local MovieBox-Tui engine.</div>
+        <div class="stream-note">Streams are prepared by your Ifallhub player.</div>
         <button class="play-button" id="play-selected" type="button" disabled>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z" /></svg><span>Play selected</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z" /></svg><span>Play automatically</span>
         </button>
       </div>
     </section>
@@ -438,7 +454,7 @@ function renderDetails(details) {
       const fallback = document.createElement('div');
       fallback.className = 'poster-fallback';
       fallback.style.setProperty('--poster-glow', `hsla(${hue}, 64%, 57%, .55)`);
-      fallback.innerHTML = `<span class="fallback-top">MOVIEBOX WEB</span><div class="fallback-art"><span>${escapeHtml(title.slice(0, 1))}</span></div><span class="fallback-bottom">${escapeHtml(title)}</span>`;
+      fallback.innerHTML = `<span class="fallback-top">IFALLHUB WEB</span><div class="fallback-art"><span>${escapeHtml(title.slice(0, 1))}</span></div><span class="fallback-bottom">${escapeHtml(title)}</span>`;
       coverImage.replaceWith(fallback);
     }, { once: true });
   }
@@ -490,7 +506,7 @@ async function loadStreams() {
   } catch (error) {
     if (request !== detailRequestNumber || !detailsDialog.open) return;
     if (subtitle) subtitle.textContent = 'The source could not be reached.';
-    list.innerHTML = `<div class="stream-empty stream-error">${escapeHtml(error.message || 'Could not load streams.')}</div>`;
+    list.innerHTML = `<div class="stream-empty stream-error">${escapeHtml(displayUiText(error.message || 'Could not load streams.'))}</div>`;
   }
 }
 
@@ -519,14 +535,14 @@ function renderStreams() {
 
   list.innerHTML = state.releases.map((release, index) => {
     const quality = release.quality || 'AUTO';
-    const mirror = release.mirrors?.[0];
-    const source = mirror?.label || providerLabel(release.provider || state.provider);
+    const source = providerLabel(release.provider || state.provider);
+    const filename = displayUiText(release.filename || 'Stream');
     const fields = [release.codec, release.language, prettySize(release.size_bytes)].filter(Boolean);
     return `
       <button class="stream-option ${index === state.selectedRelease ? 'selected' : ''}" type="button" data-release-index="${index}">
         <span class="stream-quality">${escapeHtml(quality)}</span>
         <span class="stream-main">
-          <span class="stream-name" title="${escapeHtml(release.filename || 'Stream')}">${escapeHtml(release.filename || 'Stream')}</span>
+          <span class="stream-name" title="${escapeHtml(filename)}">${escapeHtml(filename)}</span>
           <span class="stream-sub">${fields.map(escapeHtml).join('<span>·</span>') || 'Ready to play'}</span>
         </span>
         <span class="stream-source" title="${escapeHtml(source)}">${escapeHtml(source)}</span>
@@ -541,42 +557,169 @@ function renderStreams() {
       renderStreams();
     });
   });
-  if (playButton) playButton.disabled = !state.streamSetId;
+  if (playButton) playButton.disabled = !state.streamSetId || state.autoPlaybackActive;
 }
 
 async function playSelected() {
-  const selected = state.releases[state.selectedRelease];
-  if (!selected || !state.streamSetId) return;
+  if (!state.releases.length || !state.streamSetId || state.autoPlaybackActive) return;
+
   const button = $('#play-selected', detailsContent);
-  if (button) {
-    button.disabled = true;
-    button.querySelector('span').textContent = 'Preparing…';
+  const title = state.details?.title || state.item?.title || 'Now playing';
+  const firstRelease = Math.min(Math.max(Number(state.selectedRelease) || 0, 0), state.releases.length - 1);
+  const attempts = [];
+  for (let offset = 0; offset < state.releases.length; offset += 1) {
+    const releaseIndex = (firstRelease + offset) % state.releases.length;
+    const mirrorCount = Math.max(1, state.releases[releaseIndex].mirrors?.length || 1);
+    for (let mirrorIndex = 0; mirrorIndex < mirrorCount; mirrorIndex += 1) {
+      attempts.push({ releaseIndex, mirrorIndex });
+    }
   }
 
+  const runId = ++state.playbackRunId;
+  state.autoPlaybackActive = true;
+  if (button) {
+    button.disabled = true;
+    button.querySelector('span').textContent = 'Trying streams…';
+  }
+  if (!playerDialog.open) playerDialog.showModal();
+  $('#player-title').textContent = title;
+  videoError.hidden = true;
+
+  const playerStatus = $('#player-status');
+  let lastError = '';
   try {
-    const playback = await api('/api/play', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        stream_set_id: state.streamSetId,
-        release_index: state.selectedRelease,
-        mirror_index: 0,
-      }),
-    });
-    await openPlayer(playback, state.details?.title || state.item?.title || 'Now playing');
-  } catch (error) {
-    const list = $('#stream-list', detailsContent);
-    if (list) list.insertAdjacentHTML('afterbegin', `<div class="stream-empty stream-error">${escapeHtml(error.message || 'Could not prepare this stream.')}</div>`);
+    for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
+      if (runId !== state.playbackRunId || !playerDialog.open) break;
+
+      const { releaseIndex, mirrorIndex } = attempts[attemptIndex];
+      const release = state.releases[releaseIndex];
+      const quality = release.quality || 'AUTO';
+      const provider = release.provider || itemProvider(state.item) || state.provider;
+      const sourceName = providerLabel(provider);
+      state.selectedRelease = releaseIndex;
+      renderStreams();
+      $('#player-quality').textContent = String(quality).toUpperCase();
+      $('#player-source').textContent = sourceName;
+      if (playerStatus) {
+        playerStatus.textContent = `Trying ${sourceName} · ${quality} (${attemptIndex + 1} of ${attempts.length})…`;
+      }
+      videoError.hidden = true;
+
+      await closeActivePlayer();
+      if (runId !== state.playbackRunId || !playerDialog.open) break;
+
+      try {
+        const playback = await api('/api/play', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            stream_set_id: state.streamSetId,
+            release_index: releaseIndex,
+            mirror_index: mirrorIndex,
+          }),
+        });
+        if (runId !== state.playbackRunId || !playerDialog.open) break;
+
+        const result = await openPlayer(playback, title, runId, quality, provider);
+        if (result.played) {
+          if (playerStatus) {
+            playerStatus.textContent = `Now playing · ${sourceName} · ${quality}. Automatic switching stopped.`;
+          }
+          return;
+        }
+        if (result.cancelled) break;
+        lastError = result.error?.message || 'This stream could not be started.';
+      } catch (error) {
+        if (runId !== state.playbackRunId || !playerDialog.open) break;
+        lastError = error.message || 'This stream could not be prepared.';
+      }
+    }
+
+    if (runId === state.playbackRunId && playerDialog.open) {
+      const detail = lastError ? ` ${displayUiText(lastError)}` : '';
+      showVideoError(`None of the ${attempts.length} available streams could be started.${detail}`);
+      if (playerStatus) {
+        playerStatus.textContent = `Tried all ${attempts.length} streams. Close the player to choose another title or source.`;
+      }
+    }
   } finally {
-    if (button) {
-      button.disabled = !state.streamSetId;
-      button.querySelector('span').textContent = 'Play selected';
+    if (runId === state.playbackRunId) state.autoPlaybackActive = false;
+    if (button && (runId === state.playbackRunId || !state.autoPlaybackActive)) {
+      button.disabled = !state.streamSetId || state.autoPlaybackActive;
+      button.querySelector('span').textContent = 'Play automatically';
+    }
+  }
+}
+
+function createPlaybackMonitor(signal) {
+  let resolvePlayback;
+  let settled = false;
+  let timeoutId = 0;
+  const promise = new Promise((resolve) => { resolvePlayback = resolve; });
+
+  const finish = (result) => {
+    if (settled) return;
+    settled = true;
+    window.clearTimeout(timeoutId);
+    videoElement.removeEventListener('playing', onPlaying);
+    videoElement.removeEventListener('error', onVideoError);
+    signal.removeEventListener('abort', onAbort);
+    resolvePlayback(result);
+  };
+  const onPlaying = () => finish({ played: true });
+  const onVideoError = () => {
+    const code = videoElement.error?.code;
+    finish({
+      played: false,
+      error: new Error(code ? `The browser reported playback error ${code}.` : 'The browser could not play this stream.'),
+    });
+  };
+  const onAbort = () => finish({ played: false, cancelled: true });
+
+  videoElement.addEventListener('playing', onPlaying);
+  videoElement.addEventListener('error', onVideoError);
+  signal.addEventListener('abort', onAbort);
+  timeoutId = window.setTimeout(() => {
+    finish({ played: false, error: new Error('The stream did not start before the timeout.') });
+  }, STREAM_START_TIMEOUT_MS);
+  if (signal.aborted) onAbort();
+
+  return {
+    promise,
+    fail(error) {
+      finish({ played: false, error: error instanceof Error ? error : new Error(String(error || 'Stream error')) });
+    },
+    cancel() {
+      finish({ played: false, cancelled: true });
+    },
+  };
+}
+
+async function requestVideoPlayback(signal) {
+  if (signal.aborted) throw new Error('Playback was cancelled.');
+  try {
+    await videoElement.play();
+  } catch (error) {
+    if (error?.name !== 'NotAllowedError' || signal.aborted) throw error;
+
+    const wasMuted = videoElement.muted;
+    videoElement.muted = true;
+    const unmuteAfterStart = () => {
+      if (!wasMuted) videoElement.muted = false;
+    };
+    videoElement.addEventListener('playing', unmuteAfterStart, { once: true });
+    try {
+      await videoElement.play();
+    } catch (mutedError) {
+      videoElement.removeEventListener('playing', unmuteAfterStart);
+      videoElement.muted = wasMuted;
+      throw mutedError;
     }
   }
 }
 
 function showVideoError(message) {
-  $('#video-error-message').textContent = message || 'Check that the selected stream is available.';
+  $('#video-error-message').textContent = displayUiText(message || 'Check that the selected stream is available.');
   videoError.hidden = false;
 }
 
@@ -587,6 +730,7 @@ async function closeActivePlayer() {
   }
   videoElement.pause();
   videoElement.removeAttribute('src');
+  videoElement.muted = false;
   videoElement.load();
 }
 
@@ -601,38 +745,73 @@ async function loadShaka() {
   return shakaModulePromise;
 }
 
-async function openPlayer(playback, title) {
-  await closeActivePlayer();
+async function openPlayer(playback, title, runId, quality, provider) {
   const playbackUrl = playback.playback_url || playback.url;
-  if (!playbackUrl) throw new Error('The selected source did not return a playable link.');
+  if (!playbackUrl) return { played: false, error: new Error('The selected source did not return a playable link.') };
 
-  $('#player-title').textContent = playback.title || title;
-  $('#player-quality').textContent = (playback.quality || 'AUTO').toUpperCase();
-  $('#player-source').textContent = playback.source_label || 'STREAM';
+  const controller = new AbortController();
+  state.playbackController = controller;
+  const monitor = createPlaybackMonitor(controller.signal);
+  const sourceName = provider ? providerLabel(provider) : displayUiText(playback.source_label || 'STREAM');
+  $('#player-title').textContent = displayUiText(playback.title || title);
+  $('#player-quality').textContent = String(playback.quality || quality || 'AUTO').toUpperCase();
+  $('#player-source').textContent = sourceName;
   videoError.hidden = true;
   if (!playerDialog.open) playerDialog.showModal();
 
-  if (playback.stream_type === 'dash' || playback.stream_type === 'hls') {
-    try {
+  try {
+    if (controller.signal.aborted || runId !== state.playbackRunId || !playerDialog.open) {
+      monitor.cancel();
+    } else if (playback.stream_type === 'dash' || playback.stream_type === 'hls') {
       const shaka = await loadShaka();
-      const player = new shaka.Player();
-      state.activePlayer = player;
-      await player.attach(videoElement);
-      player.addEventListener('error', (event) => {
-        const detail = event.detail;
-        showVideoError(detail?.message || `Stream error ${detail?.code || ''}`.trim());
-      });
-      await player.load(playbackUrl);
-    } catch (error) {
-      showVideoError(error.message || 'This browser could not load the selected stream.');
+      if (controller.signal.aborted || runId !== state.playbackRunId || !playerDialog.open) {
+        monitor.cancel();
+      } else {
+        const player = new shaka.Player();
+        state.activePlayer = player;
+        player.addEventListener('error', (event) => {
+          const detail = event.detail;
+          const critical = detail?.severity == null
+            || detail.severity === shaka.util?.Error?.Severity?.CRITICAL
+            || detail.severity === 2;
+          if (critical) {
+            monitor.fail(new Error(detail?.message || `Stream error ${detail?.code || ''}`.trim()));
+          }
+        });
+
+        const setupPromise = (async () => {
+          await player.attach(videoElement);
+          if (controller.signal.aborted || runId !== state.playbackRunId || !playerDialog.open) return;
+          await player.load(playbackUrl);
+        })();
+        const setupResult = await Promise.race([
+          setupPromise.then(() => ({ ready: true }), (error) => ({ error })),
+          monitor.promise.then((result) => ({ result })),
+        ]);
+        if (setupResult.result) {
+          // The stream failed, timed out, or was cancelled while Shaka was loading it.
+        } else if (setupResult.error) {
+          monitor.fail(setupResult.error);
+        } else if (!controller.signal.aborted && runId === state.playbackRunId && playerDialog.open) {
+          requestVideoPlayback(controller.signal).catch((error) => monitor.fail(error));
+        }
+      }
+    } else {
+      videoElement.src = playbackUrl;
+      videoElement.load();
+      requestVideoPlayback(controller.signal).catch((error) => monitor.fail(error));
     }
-  } else {
-    videoElement.src = playbackUrl;
-    videoElement.load();
-    videoElement.addEventListener('error', () => {
-      if (videoElement.error) showVideoError('The browser could not decode this file or the stream is unavailable.');
-    }, { once: true });
+  } catch (error) {
+    monitor.fail(error);
   }
+
+  const result = await monitor.promise;
+  if (state.playbackController === controller) state.playbackController = null;
+  if (!result.played) {
+    controller.abort();
+    await closeActivePlayer();
+  }
+  return result;
 }
 
 function syncProvider(provider) {
@@ -704,6 +883,8 @@ $$('.quick-searches button').forEach((button) => {
 
 $('#retry-button').addEventListener('click', () => runSearch(searchInput.value));
 $('#help-button').addEventListener('click', () => $('#help-dialog').showModal());
+$('#sidebar-music').addEventListener('click', () => $('#music-dialog').showModal());
+$('#music-button').addEventListener('click', () => $('#music-dialog').showModal());
 $('#sidebar-search').addEventListener('click', () => setTimeout(() => searchInput.focus(), 10));
 
 document.addEventListener('click', (event) => {
@@ -712,16 +893,28 @@ document.addEventListener('click', (event) => {
   if (close.dataset.close === 'details') detailsDialog.close();
   if (close.dataset.close === 'player') playerDialog.close();
   if (close.dataset.close === 'help') $('#help-dialog').close();
+  if (close.dataset.close === 'music') $('#music-dialog').close();
   if (close.dataset.close === 'access') $('#access-dialog')?.close();
 });
 
-for (const dialog of [detailsDialog, playerDialog, $('#help-dialog'), $('#access-dialog')]) {
+for (const dialog of [detailsDialog, playerDialog, $('#help-dialog'), $('#music-dialog'), $('#access-dialog')]) {
   dialog?.addEventListener('click', (event) => {
     if (event.target === dialog) dialog.close();
   });
 }
 
-playerDialog.addEventListener('close', () => { closeActivePlayer(); });
+playerDialog.addEventListener('close', () => {
+  state.playbackRunId += 1;
+  state.autoPlaybackActive = false;
+  state.playbackController?.abort();
+  state.playbackController = null;
+  const playButton = $('#play-selected', detailsContent);
+  if (playButton) {
+    playButton.disabled = !state.streamSetId;
+    playButton.querySelector('span').textContent = 'Play automatically';
+  }
+  closeActivePlayer();
+});
 detailsDialog.addEventListener('close', () => { detailRequestNumber += 1; });
 
 window.addEventListener('keydown', (event) => {
