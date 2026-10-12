@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   report:
-    name: Rust fmt + targeted tests
+    name: Rust fmt + full test suite
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -43,14 +43,21 @@ jobs:
             | sed 's/\x1b\[[0-9;]*m//g' > /tmp/fmt.log || true
           echo "fmt diff bytes: $(wc -c < /tmp/fmt.log)"
 
-      - name: Targeted tests (library + web_api)
+      - name: Full test suite
         env:
           MOVIEBOX_CONFIG_DIR: ${{ runner.temp }}/mb_config
           MOVIEBOX_DATA_DIR: ${{ runner.temp }}/mb_data
         run: |
           set -o pipefail
-          cargo nextest run --all-features --locked library:: web_api:: 2>&1 \
-            | sed 's/\x1b\[[0-9;]*m//g' | tail -n 70 > /tmp/tests.log || true
+          cargo nextest run --all-features --locked --no-fail-fast > /tmp/tests.raw.log 2>&1 || true
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/tests.raw.log > /tmp/tests.clean.log
+          {
+            echo "failures:"
+            grep -E 'FAIL' /tmp/tests.clean.log | tail -n 40 || true
+            echo ""
+            echo "summary:"
+            grep -E 'Summary|tests run|error' /tmp/tests.clean.log | tail -n 10 || true
+          } > /tmp/tests.log
           cat /tmp/tests.log
 
       - name: Clippy for the changed files
@@ -73,7 +80,7 @@ jobs:
             echo '--- rustfmt --check (changed files) ---'
             head -c 24000 /tmp/fmt.log 2>/dev/null || echo '(clean)'
             echo ''
-            echo '--- cargo nextest (library:: web_api::) ---'
+            echo '--- cargo nextest (full suite) ---'
             cat /tmp/tests.log 2>/dev/null || echo '(no output)'
             echo ''
             echo '--- clippy ---'

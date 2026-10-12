@@ -2512,8 +2512,17 @@ mod tests {
 
     #[test]
     fn related_seeds_skip_stopword_titles_and_blank_directors() {
-        let seeds = related_seeds(&details_for("The Thing", Some("  "), &[]));
-        assert!(seeds.is_empty(), "no usable seeds: {seeds:?}");
+        // A whitespace-only director adds nothing, and a stopword-only title has
+        // no franchise token, so there is nothing left to search with.
+        let seeds = related_seeds(&details_for("The", Some("  "), &[]));
+        assert!(seeds.is_empty(), "expected no seeds: {seeds:?}");
+
+        // Dropping the stopword lead still leaves a usable franchise token, the
+        // same way "The Batman" yields "Batman".
+        let thing = related_seeds(&details_for("The Thing", Some("   "), &[]));
+        assert_eq!(thing.len(), 1);
+        assert_eq!(thing[0].term, "Thing");
+
         let franchise = related_seeds(&details_for("Dune: Part Two", None, &[]));
         assert_eq!(franchise.len(), 1);
         assert_eq!(franchise[0].term, "Dune");
