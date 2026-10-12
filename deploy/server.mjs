@@ -259,7 +259,10 @@ function proxyApi(req, res, retryCount = 0) {
   upstreamHeaders.connection = 'close';
 
   const isMedia = req.url.startsWith('/api/media/');
-  const maxRetries = isMedia ? 1 : 2;
+  // Server-sent events stay open on purpose: never retry them and keep the
+  // socket quiet-tolerant, or every library update would drop the stream.
+  const isEventStream = req.url.startsWith('/api/library/events');
+  const maxRetries = isMedia || isEventStream ? (isEventStream ? 0 : 1) : 2;
   const request = http.request(
     {
       protocol: apiOrigin.protocol,
@@ -271,7 +274,7 @@ function proxyApi(req, res, retryCount = 0) {
     },
     (upstream) => {
       // Retry on 502/503/504 for non-media requests
-      if (!isMedia && [502, 503, 504].includes(upstream.statusCode) && retryCount < maxRetries) {
+      if (!isMedia && !isEventStream && [502, 503, 504].includes(upstream.statusCode) && retryCount < maxRetries) {
         log(`Retrying ${req.url} after ${upstream.statusCode} (attempt ${retryCount + 1})`);
         upstream.resume();
         setTimeout(() => proxyApi(req, res, retryCount + 1), 200 * (retryCount + 1));
@@ -284,6 +287,10 @@ function proxyApi(req, res, retryCount = 0) {
       for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers[name] = value;
       // Add CORS for media
       if (isMedia) headers['Access-Control-Allow-Origin'] = '*';
+      if (isEventStream) {
+        headers['Cache-Control'] = 'no-store, no-transform';
+        headers['X-Accel-Buffering'] = 'no';
+      }
       res.writeHead(upstream.statusCode || 502, headers);
       if (req.method === 'HEAD') {
         upstream.resume();
@@ -296,13 +303,14 @@ function proxyApi(req, res, retryCount = 0) {
 
   // Media streams can legitimately be quiet for long stretches.
   // Increased timeouts to handle concurrent load
-  request.setTimeout(isMedia ? 300_000 : 90_000, () => {
+  // Media and event streams can legitimately be quiet for long stretches.
+  request.setTimeout(isEventStream ? 0 : isMedia ? 300_000 : 90_000, () => {
     request.destroy(new Error('upstream timeout'));
   });
 
   request.on('error', (error) => {
     log(`api proxy error for ${req.url}: ${error.message} (retry ${retryCount})`);
-    if (retryCount < maxRetries && !isMedia) {
+    if (retryCount < maxRetries && !isMedia && !isEventStream) {
       setTimeout(() => proxyApi(req, res, retryCount + 1), 300 * (retryCount + 1));
       return;
     }

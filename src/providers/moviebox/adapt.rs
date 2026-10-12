@@ -593,7 +593,11 @@ fn to_manifest_url(url_str: &str) -> Option<String> {
     // Fallback: if url looks like a cdn path with dash or hls segment, try to infer
     // For backward compatibility, also accept any url that has at least 2 path segments after domain
     // and treat it as potential dash if it doesn't explicitly say hls
-    if base.contains("hakunaymatata.com") || base.contains("aoneroom.com") || base.contains("sacdn") || base.contains("sbcdn") {
+    if base.contains("hakunaymatata.com")
+        || base.contains("aoneroom.com")
+        || base.contains("sacdn")
+        || base.contains("sbcdn")
+    {
         // Default to dash for legacy cdn urls that don't have explicit marker but are from known cdns
         // However if url contains \"hls\" anywhere, treat as hls
         if base.to_ascii_lowercase().contains("hls") {

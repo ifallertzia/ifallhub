@@ -13,11 +13,17 @@
   - Reset the download resolution state lock on 4KHDHub resolver timeouts and errors so failed mirror resolutions do not block subsequent download attempts.
   - Added sequential single-connection fallback to the internal HTTP downloader when multi-worker segmented range requests receive HTTP 403, 429, or network disconnects.
 ### Added
+- **Web client: full streaming + tracker experience**:
+  - Rebuilt the browser UI as a Netflix/IMDb-style app: home carousels (Continue Watching, Trending Now, Top Rated, Fresh & Highly Rated, Most Watched, personalised "Because you watch"), a search page with live suggestions and source/type/sort filters, an IMDb-style title page (rating ring, credits, genres, episode picker, stream list), a player page with server rotation and "More like this" underneath, plus My List and Tracker pages.
+  - Added a server-backed library (`src/library.rs`) persisted to `web_library.json` in the data directory: watchlist entries, resume progress and personal 1-10 ratings, with caps, atomic writes and corrupt-file rotation.
+  - Added web API routes `GET /api/library`, `POST /api/library/{watchlist,progress,rating,clear}`, `GET /api/collections`, `GET /api/related`, `GET /api/suggest` and `GET /api/meta`, each covered by unit tests or the production smoke test.
+  - Added `GET /api/library/events`, a server-sent-events stream that pushes every library change to connected browsers, so watchlist/ratings/progress stay in sync live across tabs and devices (the client falls back to polling and `localStorage` when an older engine lacks the route).
 - **In-App Updater Lifecycle**:
   - Tracked target executable path before staging updates and resolved deleted inode suffixes (` (deleted)`) on Linux to restart the new binary automatically after popup self-update.
   - Scoped Snap package detection to `SNAP_NAME` matching `moviebox-tui` to prevent false positive Snap environment detection when launched inside unrelated host sandboxes.
 
 ### Changed
+- **Web deployment**: `deploy/server.mjs` now treats `/api/library/events` as a long-lived stream (no retry, no idle timeout, no buffering) so SSE survives the reverse proxy, and the smoke test covers the library, event-stream and discovery-extra routes.
 - **Web player (Sakshi-first rotation)**:
   - Auto-play now tries servers in order: Sakshi, then Ritu, then Siddharth, then the rest, one after another. Each server's links and mirrors are tried before moving on. The source picker still defaults to Siddharth.
   - Play automatically stays available once a title loads, even when the origin server has no links.

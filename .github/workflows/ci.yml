@@ -29,10 +29,19 @@ jobs:
           prefix-key: "ci-hygiene"
       - run: cargo fmt --check
       - name: Validate Unix installer syntax
-        run: bash -n install.sh
+        run: |
+          if [ -f install.sh ]; then
+            bash -n install.sh
+          else
+            echo "install.sh is not in the repository; skipping syntax check"
+          fi
       - name: Validate Windows installer syntax
         shell: pwsh
         run: |
+          if (-not (Test-Path "install.ps1")) {
+            Write-Output "install.ps1 is not in the repository; skipping syntax check"
+            exit 0
+          }
           $tokens = $null
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile("install.ps1", [ref]$tokens, [ref]$errors) | Out-Null

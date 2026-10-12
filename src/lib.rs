@@ -3,6 +3,7 @@ pub mod config;
 pub mod download;
 pub mod favorites;
 pub mod history;
+pub mod library;
 pub mod logging;
 pub mod models;
 pub mod net;
