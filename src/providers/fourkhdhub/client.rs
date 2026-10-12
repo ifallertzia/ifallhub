@@ -166,10 +166,10 @@ impl FourKHdHubClient {
                             .map(|url| vec![(url, mirror_label, mirror_headers)])
                     }
                 };
-                tokio::time::timeout(std::time::Duration::from_millis(7000), fetch)
+                tokio::time::timeout(std::time::Duration::from_millis(10000), fetch)
                     .await
                     .map_err(|_| {
-                        FourKHdHubError::NoPlayableMirror("mirror resolver timed out".into())
+                        FourKHdHubError::NoPlayableMirror("mirror resolver timed out (10s)".into())
                     })
                     .and_then(|res| res)
             });
@@ -387,10 +387,10 @@ impl FourKHdHubClient {
             Ok((final_url.to_string(), is_seekable))
         };
 
-        tokio::time::timeout(std::time::Duration::from_millis(3500), probe)
+        tokio::time::timeout(std::time::Duration::from_millis(5000), probe)
             .await
             .map_err(|_| {
-                FourKHdHubError::NoPlayableMirror("mirror preflight probe timed out (3.5s)".into())
+                FourKHdHubError::NoPlayableMirror("mirror preflight probe timed out (5s)".into())
             })?
     }
 
@@ -413,8 +413,10 @@ impl FourKHdHubClient {
 
 fn build_client() -> reqwest::Client {
     crate::net::http_client_builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_max_idle_per_host(32)
+        .tcp_keepalive(std::time::Duration::from_secs(30))
         .user_agent(BROWSER_UA)
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()

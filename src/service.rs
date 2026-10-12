@@ -29,7 +29,10 @@ impl Default for MovieBoxService {
 impl MovieBoxService {
     pub fn new() -> Self {
         let http_client = crate::net::http_client_builder()
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(20))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .pool_max_idle_per_host(32)
+            .tcp_keepalive(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_default();
 

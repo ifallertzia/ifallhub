@@ -63,7 +63,9 @@ impl DramachiClient {
 
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         let client = crate::net::http_client_builder()
-            .timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(20))
+            .connect_timeout(Duration::from_secs(10))
+            .pool_max_idle_per_host(16)
             .build()
             .unwrap_or_default();
         Self {

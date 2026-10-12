@@ -212,7 +212,7 @@ impl CircleFtpClient {
     }
 
     async fn fetch_size(&self, link: &str) -> Option<u64> {
-        tokio::time::timeout(Duration::from_millis(1200), self.client.head(link).send())
+        tokio::time::timeout(Duration::from_millis(3000), self.client.head(link).send())
             .await
             .ok()?
             .ok()?
@@ -323,7 +323,9 @@ impl CircleFtpClient {
 
 fn build_client() -> reqwest::Client {
     crate::net::http_client_builder()
-        .timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+                .connect_timeout(Duration::from_secs(5))
+                .pool_max_idle_per_host(16)
         .build()
         .expect("circleftp http client")
 }

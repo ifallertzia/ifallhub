@@ -20,9 +20,9 @@ services:
         generateValue: true
       # Edge rate limits (requests per minute per client, 0 disables).
       - key: MOVIEBOX_WEB_RATE_LIMIT
-        value: "120"
+        value: "300"
       - key: MOVIEBOX_WEB_MEDIA_RATE_LIMIT
-        value: "600"
+        value: "1200"
       # Optional provider configuration (set in the dashboard as needed):
       #   MOVIEBOX_FOURKHDHUB_URL - custom 4KHDHub base URL
       #   MOVIEBOX_LOG            - off | error | warn | info | debug | trace
