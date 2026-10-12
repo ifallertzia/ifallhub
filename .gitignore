@@ -24,3 +24,7 @@ dist/
 book/
 docs/changelog.md
 docs/contributing.md
+
+# Python bytecode
+__pycache__/
+*.py[cod]
