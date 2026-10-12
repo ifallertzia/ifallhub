@@ -279,6 +279,12 @@ dialog::backdrop { background: rgba(3,3,6,.8); backdrop-filter: blur(10px); }
 .help-callout > span { display: grid; place-items: center; width: 16px; height: 16px; flex: 0 0 16px; border: 1px solid rgba(132,224,179,.35); border-radius: 50%; color: var(--mint); font-family: var(--mono); font-size: 9px; }
 .help-callout p { margin: 0; color: #a2a0aa; font-size: 8px; line-height: 1.7; }
 
+.access-form { display: flex; gap: 8px; margin-top: 4px; }
+.access-input { flex: 1; min-width: 0; height: 38px; padding: 0 13px; border: 1px solid rgba(255,255,255,.13); border-radius: 8px; color: #f0edf3; background: rgba(255,255,255,.05); font-family: var(--mono); font-size: 10px; outline: none; }
+.access-input:focus { border-color: rgba(255,117,88,.55); box-shadow: 0 0 0 3px rgba(255,117,88,.12); }
+.access-submit { min-height: 38px; padding: 0 17px; border: 0; border-radius: 8px; color: #fff; background: linear-gradient(135deg, #ff7355, #e74641); font-family: Manrope, sans-serif; font-size: 10px; font-weight: 700; letter-spacing: .2px; cursor: pointer; transition: .18s ease; }
+.access-submit:hover { filter: brightness(1.08); }
+
 @media (min-width: 1550px) { .results-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
 @media (max-width: 1240px) { .results-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } .hero-copy { width: 57%; } .art-play { right: 3%; } }
 @media (max-width: 900px) {

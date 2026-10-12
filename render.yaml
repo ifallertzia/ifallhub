@@ -1,0 +1,28 @@
+# Render Blueprint for the MovieBox web player.
+#
+# Deploy this as a Render Web Service using the Docker runtime - NOT as a
+# Static Site. A static host cannot proxy /api/* to the Rust engine, so search
+# and playback would not work. See docs/web-deployment.md for the full guide.
+services:
+  - type: web
+    name: moviebox-web
+    runtime: docker
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /api/health
+    # Render injects PORT; deploy/server.mjs binds 0.0.0.0:$PORT and keeps the
+    # Rust API on 127.0.0.1 inside the service. The TUI is never launched.
+    envVars:
+      # Shared access key for the JSON API. Render generates and stores this as
+      # a secret - it is never committed to the repository or baked into the
+      # image. Rotate it from the Render dashboard when needed.
+      - key: MOVIEBOX_WEB_API_TOKEN
+        generateValue: true
+      # Edge rate limits (requests per minute per client, 0 disables).
+      - key: MOVIEBOX_WEB_RATE_LIMIT
+        value: "120"
+      - key: MOVIEBOX_WEB_MEDIA_RATE_LIMIT
+        value: "600"
+      # Optional provider configuration (set in the dashboard as needed):
+      #   MOVIEBOX_FOURKHDHUB_URL - custom 4KHDHub base URL
+      #   MOVIEBOX_LOG            - off | error | warn | info | debug | trace

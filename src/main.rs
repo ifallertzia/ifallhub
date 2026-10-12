@@ -111,6 +111,8 @@ async fn main() -> std::io::Result<()> {
         println!("    MOVIEBOX_VLC_PATH       Custom vlc binary path");
         println!("    MOVIEBOX_IINA_PATH      Custom iina-cli binary path");
         println!("    MOVIEBOX_FOURKHDHUB_URL Custom 4KHDHub base URL");
+        println!("    MOVIEBOX_WEB_API_TOKEN  Access key for the --web-api HTTP API");
+        println!("    MOVIEBOX_WEB_API_RATE_PER_MIN Web API rate limit per client (0 disables)");
         println!("    MOVIEBOX_NO_IMAGE       Disable poster image queries (1/true)");
         println!(
             "    MOVIEBOX_IMAGE_PROTOCOL Force graphics protocol (kitty, sixel, iterm2, none)"

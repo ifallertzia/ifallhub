@@ -1,0 +1,155 @@
+name: Web deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Production stack smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: web-deploy
+      - name: Build Rust API
+        run: cargo build --locked
+      - name: Boot production stack
+        run: |
+          PORT=8080 \
+            MOVIEBOX_API_BIN="$PWD/target/debug/moviebox-tui" \
+            MOVIEBOX_WEB_API_TOKEN=ci-test-key \
+            node deploy/server.mjs > /tmp/server.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8080/api/health > /dev/null; then
+              echo "stack is healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "stack never became healthy"
+          exit 1
+      - name: Run smoke checks
+        run: |
+          set -o pipefail
+          node deploy/smoke.mjs --base http://127.0.0.1:8080 --token ci-test-key | tee /tmp/smoke.log
+      - name: Attempt real playback end to end (best effort)
+        id: real
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          node deploy/smoke.mjs --base http://127.0.0.1:8080 --token ci-test-key --real | tee /tmp/real.log
+      - name: Capture clippy output for the report
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          cargo clippy --message-format=short --all-targets --all-features --locked -- -D warnings 2>&1 \
+            | sed 's/\x1b\[[0-9;]*m//g' > /tmp/clippy.log || true
+      - name: Report results on the PR
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REAL_OUTCOME: ${{ steps.real.outcome }}
+        run: |
+          {
+            echo '### Web deploy · production stack smoke test'
+            echo ''
+            echo "Job result: \`${{ job.status }}\` · real playback step: \`${REAL_OUTCOME}\`"
+            echo ''
+            echo '```'
+            echo '--- smoke checks ---'
+            cat /tmp/smoke.log 2>/dev/null || echo '(no smoke log)'
+            echo ''
+            echo '--- real playback attempt ---'
+            cat /tmp/real.log 2>/dev/null || echo '(no real-playback log)'
+            echo ''
+            echo '--- clippy (tail) ---'
+            tail -c 12000 /tmp/clippy.log 2>/dev/null || echo '(no clippy log)'
+            echo ''
+            echo '--- server log tail ---'
+            tail -n 40 /tmp/server.log 2>/dev/null || echo '(no server log)'
+            echo '```'
+          } > /tmp/comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md
+
+  image:
+    name: Docker image smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Build production image
+        run: |
+          set -o pipefail
+          docker build -t moviebox-web . | tee /tmp/docker-build.log
+      - name: Run production container
+        run: |
+          docker run -d --name moviebox-web -p 8080:8080 \
+            -e PORT=8080 -e MOVIEBOX_WEB_API_TOKEN=docker-test-key moviebox-web
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8080/api/health > /dev/null; then
+              echo "container is healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "container never became healthy"
+          exit 1
+      - name: Run container smoke checks
+        run: |
+          set -o pipefail
+          node deploy/smoke.mjs --base http://127.0.0.1:8080 --token docker-test-key | tee /tmp/smoke.log
+      - name: Report results on the PR
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo '### Web deploy · Docker image smoke test'
+            echo ''
+            echo "Job result: \`${{ job.status }}\`"
+            echo ''
+            echo '```'
+            echo '--- smoke checks ---'
+            cat /tmp/smoke.log 2>/dev/null || echo '(no smoke log)'
+            echo ''
+            echo '--- docker ps -a ---'
+            docker ps -a 2>&1 | head -5
+            echo ''
+            echo '--- container inspect ---'
+            docker inspect moviebox-web --format '{{json .State}}' 2>&1 | head -5
+            echo ''
+            echo '--- container logs ---'
+            docker logs --tail 80 moviebox-web 2>&1 || echo '(container not running)'
+            echo '```'
+          } > /tmp/comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md
