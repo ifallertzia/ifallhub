@@ -243,10 +243,10 @@ impl LibraryStore {
         if remove {
             let before = snapshot.watchlist.len();
             snapshot.watchlist.retain(|item| item.key() != key);
-            if snapshot.watchlist.len() != before {
-                self.commit(&mut snapshot, "watchlist", key, false);
-                return false;
-            }
+            // Commit only when something actually left the list, otherwise every
+            // unlist request would rewrite the file and wake every client.
+            let removed = snapshot.watchlist.len() != before;
+            self.commit(&mut snapshot, "watchlist", key, removed);
             return false;
         }
         let stamp = now_secs();
@@ -311,9 +311,8 @@ impl LibraryStore {
         if entry.rating == 0 {
             let before = snapshot.ratings.len();
             snapshot.ratings.retain(|item| item.key() != key);
-            if snapshot.ratings.len() != before {
-                self.commit(&mut snapshot, "ratings", key, false);
-            }
+            let removed = snapshot.ratings.len() != before;
+            self.commit(&mut snapshot, "ratings", key, removed);
             return false;
         }
         entry.rating = entry.rating.min(10);
@@ -334,6 +333,16 @@ impl LibraryStore {
     /// Clears one scope (`watchlist`, `progress`, `ratings`) or everything.
     pub async fn clear(&self, scope: &str) {
         let mut snapshot = self.snapshot.lock().await;
+        let cleared = match scope {
+            "watchlist" => !snapshot.watchlist.is_empty(),
+            "progress" => !snapshot.progress.is_empty(),
+            "ratings" => !snapshot.ratings.is_empty(),
+            _ => {
+                !snapshot.watchlist.is_empty()
+                    || !snapshot.progress.is_empty()
+                    || !snapshot.ratings.is_empty()
+            }
+        };
         match scope {
             "watchlist" => snapshot.watchlist.clear(),
             "progress" => snapshot.progress.clear(),
@@ -344,7 +353,7 @@ impl LibraryStore {
                 snapshot.ratings.clear();
             }
         }
-        self.commit(&mut snapshot, "clear", "*".to_string(), true);
+        self.commit(&mut snapshot, "clear", "*".to_string(), cleared);
     }
 
     /// Bumps the version, persists and notifies subscribers.
@@ -579,6 +588,57 @@ mod tests {
             .toggle_watchlist(entry("moviebox", "1", "Dune"), true)
             .await;
         assert_eq!(store.snapshot().await.version, 2);
+    }
+
+    #[tokio::test]
+    async fn removals_persist_and_bump_the_version() {
+        let path = temp_path("remove");
+        let store = LibraryStore::load(Some(path.clone()));
+        store
+            .toggle_watchlist(entry("moviebox", "1", "Dune"), false)
+            .await;
+        store
+            .set_rating(rating_entry("moviebox", "1", "Dune", None, None, 7))
+            .await;
+        assert_eq!(store.snapshot().await.version, 2);
+
+        // The returned bool is "is it listed now", never "did something change".
+        assert!(
+            !store
+                .toggle_watchlist(entry("moviebox", "1", "Dune"), true)
+                .await
+        );
+        assert!(
+            !store
+                .set_rating(rating_entry("moviebox", "1", "Dune", None, None, 0))
+                .await
+        );
+
+        let snapshot = store.snapshot().await;
+        assert_eq!(snapshot.version, 4);
+        assert!(snapshot.watchlist.is_empty());
+        assert!(snapshot.ratings.is_empty());
+        drop(snapshot);
+
+        let reloaded = LibraryStore::load(Some(path.clone()));
+        assert_eq!(reloaded.snapshot().await.version, 4);
+        assert!(reloaded.snapshot().await.watchlist.is_empty());
+        assert!(reloaded.snapshot().await.ratings.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn clearing_an_empty_scope_is_a_no_op() {
+        let store = LibraryStore::load(None);
+        store.clear("watchlist").await;
+        assert_eq!(store.snapshot().await.version, 0);
+
+        store
+            .toggle_watchlist(entry("moviebox", "1", "Dune"), false)
+            .await;
+        store.clear("watchlist").await;
+        assert_eq!(store.snapshot().await.version, 2);
+        assert!(store.snapshot().await.watchlist.is_empty());
     }
 
     #[tokio::test]

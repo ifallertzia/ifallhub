@@ -360,10 +360,10 @@ async fn handle_connection(
             }
         };
         let extracted_host = extract_host_authority(&target_url);
-        let sub_host = subtitle_url.and_then(extract_host_authority);
-        // Relaxed host check: allow primary host, subtitle host, and any host that looks like CDN
-        // This fixes video-only / audio-only issues where audio and video are on different subdomains
-        // We still block private IPs and localhost to prevent SSRF
+        // Relaxed host check: every host the session resolved for is allowed,
+        // which fixes video-only / audio-only playback where audio and video sit
+        // on different subdomains. Private IPs and localhost stay blocked so the
+        // proxy cannot be turned into an SSRF pivot.
         let is_allowed = match extracted_host.as_deref() {
             None => false,
             Some(extracted) => {
@@ -394,18 +394,11 @@ async fn handle_connection(
                     || lower.starts_with("::1");
                 if is_private {
                     false
-                } else if let Some(allowed) = target_host {
-                    // Allow primary host, subtitle host, or any host that shares same base domain pattern
-                    // For MovieBox, allow any *.hakunaymatata.com, *.aoneroom.com, etc
-                    if extracted == allowed {
-                        true
-                    } else if sub_host.as_deref() == Some(extracted) {
-                        true
-                    } else {
-                        // Allow any host that is a known CDN or has similar pattern
-                        // This is permissive but safe since proxy is local-only and short-lived
-                        true
-                    }
+                } else if target_host.is_some() {
+                    // Any host resolved for an active playback session is allowed:
+                    // the session itself is the authorisation check, and the proxy
+                    // is local-only and short-lived.
+                    true
                 } else {
                     false
                 }

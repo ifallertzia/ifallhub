@@ -71,7 +71,7 @@ jobs:
             echo ''
             echo '```'
             echo '--- rustfmt --check (changed files) ---'
-            head -c 9000 /tmp/fmt.log 2>/dev/null || echo '(clean)'
+            head -c 24000 /tmp/fmt.log 2>/dev/null || echo '(clean)'
             echo ''
             echo '--- cargo nextest (library:: web_api::) ---'
             cat /tmp/tests.log 2>/dev/null || echo '(no output)'

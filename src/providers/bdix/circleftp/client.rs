@@ -324,8 +324,8 @@ impl CircleFtpClient {
 fn build_client() -> reqwest::Client {
     crate::net::http_client_builder()
         .timeout(Duration::from_secs(10))
-                .connect_timeout(Duration::from_secs(5))
-                .pool_max_idle_per_host(16)
+        .connect_timeout(Duration::from_secs(5))
+        .pool_max_idle_per_host(16)
         .build()
         .expect("circleftp http client")
 }

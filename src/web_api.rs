@@ -1637,7 +1637,9 @@ async fn proxy_media(
         {
             let mut playbacks = state.playbacks.lock().await;
             if let Some(playback) = playbacks.get_mut(&token) {
-                playback.allowed_hosts.extend(combined_hosts.iter().cloned());
+                playback
+                    .allowed_hosts
+                    .extend(combined_hosts.iter().cloned());
             }
         }
         let rewritten = if is_hls {
@@ -1732,7 +1734,11 @@ fn extract_hosts_from_text(text: &str) -> HashSet<String> {
         let http_pos = remaining.find("http://");
         let (pos, is_https) = match (https_pos, http_pos) {
             (Some(a), Some(b)) => {
-                if a < b { (a, true) } else { (b, false) }
+                if a < b {
+                    (a, true)
+                } else {
+                    (b, false)
+                }
             }
             (Some(a), None) => (a, true),
             (None, Some(b)) => (b, false),
@@ -1741,10 +1747,21 @@ fn extract_hosts_from_text(text: &str) -> HashSet<String> {
         let start = idx + pos;
         let url_start = start;
         // Find end of URL: whitespace, quote, <, >, or newline
-        let after_scheme = if is_https { &text[url_start + 8..] } else { &text[url_start + 7..] };
+        let after_scheme = if is_https {
+            &text[url_start + 8..]
+        } else {
+            &text[url_start + 7..]
+        };
         let mut end_offset = after_scheme.len();
         for (i, c) in after_scheme.char_indices() {
-            if c.is_whitespace() || c == '"' || c == '\'' || c == '<' || c == '>' || c == ')' || c == ' ' {
+            if c.is_whitespace()
+                || c == '"'
+                || c == '\''
+                || c == '<'
+                || c == '>'
+                || c == ')'
+                || c == ' '
+            {
                 end_offset = i;
                 break;
             }
@@ -2062,7 +2079,10 @@ fn parse_media_target(target: &str) -> Option<(String, Url)> {
 fn stream_type(url: &Url) -> &'static str {
     let url_str = url.as_str().to_ascii_lowercase();
     let path = url.path().to_ascii_lowercase();
-    if crate::player::is_dash_url(url.as_str()) || path.ends_with(".mpd") || url_str.contains("/dash/") {
+    if crate::player::is_dash_url(url.as_str())
+        || path.ends_with(".mpd")
+        || url_str.contains("/dash/")
+    {
         "dash"
     } else if path.ends_with(".m3u8")
         || path.ends_with(".m3u")
