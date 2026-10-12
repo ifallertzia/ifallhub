@@ -528,7 +528,9 @@ async fn route_api(request: &HttpRequest, state: &WebState) -> HttpResponse {
         "/api/library/watchlist" if request.method == "POST" => {
             library_watchlist(request, state).await
         }
-        "/api/library/progress" if request.method == "POST" => library_progress(request, state).await,
+        "/api/library/progress" if request.method == "POST" => {
+            library_progress(request, state).await
+        }
         "/api/library/rating" if request.method == "POST" => library_rating(request, state).await,
         "/api/library/clear" if request.method == "POST" => library_clear(request, state).await,
         _ => HttpResponse::error(404, "Unknown API route"),
@@ -611,7 +613,8 @@ async fn suggest(query: &str, state: &WebState) -> HttpResponse {
 async fn collections(query: &str, state: &WebState) -> HttpResponse {
     let params = parse_query(query);
     let per_row = parse_usize(params.get("limit"), 24, 48).clamp(8, 48);
-    let pages = parse_usize(params.get("pages"), 3, MAX_HOMEPAGE_PAGES).clamp(1, MAX_HOMEPAGE_PAGES);
+    let pages =
+        parse_usize(params.get("pages"), 3, MAX_HOMEPAGE_PAGES).clamp(1, MAX_HOMEPAGE_PAGES);
     let pool = match homepage_pool(state, pages).await {
         Ok(pool) => pool,
         Err(message) => return HttpResponse::error(502, message),
@@ -679,9 +682,9 @@ async fn homepage_pool(state: &WebState, pages: usize) -> Result<Vec<CatalogRow>
         let cache_key = format!("homepage:{page}");
         let cached = {
             let cache = state.homepage_pages.lock().await;
-            cache
-                .get(&cache_key)
-                .and_then(|(fetched, rows)| (fetched.elapsed() < HOMEPAGE_TTL).then(|| rows.clone()))
+            cache.get(&cache_key).and_then(|(fetched, rows)| {
+                (fetched.elapsed() < HOMEPAGE_TTL).then(|| rows.clone())
+            })
         };
         let rows = match cached {
             Some(rows) => rows,
@@ -773,7 +776,8 @@ fn franchise_token(title: &str) -> Option<String> {
         .split(|character: char| !character.is_alphanumeric())
         .map(str::trim)
         .find(|word| {
-            word.chars().count() > 3 && !SEED_STOPWORDS.contains(&word.to_ascii_lowercase().as_str())
+            word.chars().count() > 3
+                && !SEED_STOPWORDS.contains(&word.to_ascii_lowercase().as_str())
         })
         .map(str::to_string)
 }
@@ -1049,7 +1053,7 @@ async fn library_watchlist(request: &HttpRequest, state: &WebState) -> HttpRespo
     let body: LibraryItemRequest = match serde_json::from_slice(&request.body) {
         Ok(body) => body,
         Err(error) => {
-            return HttpResponse::error(400, format!("Invalid watchlist request: {error}"))
+            return HttpResponse::error(400, format!("Invalid watchlist request: {error}"));
         }
     };
     let (provider, id) = match parse_library_target(&body.provider, &body.id) {
@@ -1073,7 +1077,7 @@ async fn library_progress(request: &HttpRequest, state: &WebState) -> HttpRespon
     let body: ProgressRequest = match serde_json::from_slice(&request.body) {
         Ok(body) => body,
         Err(error) => {
-            return HttpResponse::error(400, format!("Invalid progress request: {error}"))
+            return HttpResponse::error(400, format!("Invalid progress request: {error}"));
         }
     };
     let (provider, id) = match parse_library_target(&body.provider, &body.id) {

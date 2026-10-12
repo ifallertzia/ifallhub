@@ -30,6 +30,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: arena-verify
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
 
       - name: rustfmt diff for the changed Rust files
         run: |
@@ -40,12 +44,13 @@ jobs:
           echo "fmt diff bytes: $(wc -c < /tmp/fmt.log)"
 
       - name: Targeted tests (library + web_api)
+        env:
+          MOVIEBOX_CONFIG_DIR: ${{ runner.temp }}/mb_config
+          MOVIEBOX_DATA_DIR: ${{ runner.temp }}/mb_data
         run: |
           set -o pipefail
-          cargo install cargo-nextest --locked 2>/dev/null || true
-          export PATH="$HOME/.cargo/bin:$PATH"
           cargo nextest run --all-features --locked library:: web_api:: 2>&1 \
-            | sed 's/\x1b\[[0-9;]*m//g' | tail -n 60 > /tmp/tests.log || true
+            | sed 's/\x1b\[[0-9;]*m//g' | tail -n 70 > /tmp/tests.log || true
           cat /tmp/tests.log
 
       - name: Clippy for the changed files

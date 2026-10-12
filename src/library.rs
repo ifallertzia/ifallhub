@@ -253,6 +253,15 @@ impl LibraryStore {
         entry.updated_at = stamp;
         match snapshot.watchlist.iter_mut().find(|item| item.key() == key) {
             Some(existing) => {
+                let unchanged = existing.title == entry.title
+                    && existing.poster_url == entry.poster_url
+                    && existing.year == entry.year
+                    && existing.media_type == entry.media_type
+                    && existing.official_rating == entry.official_rating;
+                if unchanged {
+                    // Already listed with the same data: no write, no event.
+                    return true;
+                }
                 entry.added_at = existing.added_at;
                 *existing = entry;
             }
@@ -265,7 +274,11 @@ impl LibraryStore {
         true
     }
 
-    pub async fn upsert_progress(&self, mut entry: ProgressEntry, remove: bool) -> Option<ProgressEntry> {
+    pub async fn upsert_progress(
+        &self,
+        mut entry: ProgressEntry,
+        remove: bool,
+    ) -> Option<ProgressEntry> {
         let key = entry.key();
         let mut snapshot = self.snapshot.lock().await;
         if remove {
@@ -306,7 +319,12 @@ impl LibraryStore {
         entry.rating = entry.rating.min(10);
         entry.updated_at = now_secs();
         match snapshot.ratings.iter_mut().find(|item| item.key() == key) {
-            Some(existing) => *existing = entry,
+            Some(existing) => {
+                if existing.rating == entry.rating {
+                    return true;
+                }
+                *existing = entry;
+            }
             None => snapshot.ratings.push(entry),
         }
         self.commit(&mut snapshot, "ratings", key, true);
@@ -330,7 +348,13 @@ impl LibraryStore {
     }
 
     /// Bumps the version, persists and notifies subscribers.
-    fn commit(&self, snapshot: &mut LibrarySnapshot, scope: &'static str, key: String, changed: bool) {
+    fn commit(
+        &self,
+        snapshot: &mut LibrarySnapshot,
+        scope: &'static str,
+        key: String,
+        changed: bool,
+    ) {
         if !changed {
             return;
         }
@@ -458,17 +482,27 @@ mod tests {
     async fn watchlist_toggle_is_idempotent_and_persists() {
         let path = temp_path("toggle");
         let store = LibraryStore::load(Some(path.clone()));
-        assert!(store.toggle_watchlist(entry("moviebox", "1", "Dune"), false).await);
-        assert!(store
-            .toggle_watchlist(entry("moviebox", "1", "Dune"), false)
-            .await);
+        assert!(
+            store
+                .toggle_watchlist(entry("moviebox", "1", "Dune"), false)
+                .await
+        );
+        assert!(
+            store
+                .toggle_watchlist(entry("moviebox", "1", "Dune"), false)
+                .await
+        );
         assert_eq!(store.snapshot().await.watchlist.len(), 1);
 
         let reloaded = LibraryStore::load(Some(path.clone()));
         assert_eq!(reloaded.snapshot().await.watchlist.len(), 1);
         assert_eq!(reloaded.snapshot().await.version, 1);
 
-        assert!(!store.toggle_watchlist(entry("moviebox", "1", "Dune"), true).await);
+        assert!(
+            !store
+                .toggle_watchlist(entry("moviebox", "1", "Dune"), true)
+                .await
+        );
         assert!(store.snapshot().await.watchlist.is_empty());
         let _ = std::fs::remove_file(&path);
     }
@@ -490,7 +524,17 @@ mod tests {
         let store = LibraryStore::load(None);
         let update = |position: u64| {
             progress_entry(
-                "moviebox", "7", "Interstellar", None, None, None, 0, 0, position, Some(10_140), false,
+                "moviebox",
+                "7",
+                "Interstellar",
+                None,
+                None,
+                None,
+                0,
+                0,
+                position,
+                Some(10_140),
+                false,
             )
         };
         store.upsert_progress(update(60), false).await;
@@ -545,7 +589,19 @@ mod tests {
             .await;
         store
             .upsert_progress(
-                progress_entry("moviebox", "1", "Dune", None, None, None, 0, 0, 30, Some(100), false),
+                progress_entry(
+                    "moviebox",
+                    "1",
+                    "Dune",
+                    None,
+                    None,
+                    None,
+                    0,
+                    0,
+                    30,
+                    Some(100),
+                    false,
+                ),
                 false,
             )
             .await;
