@@ -80,7 +80,7 @@ jobs:
           status=$?
           if [ "$status" -ne 0 ]; then
             cat /tmp/cargo-audit.log
-            details=$(tail -n 20 /tmp/cargo-audit.log | tr '\n' ' ')
+            details=$(tail -n 100 /tmp/cargo-audit.log | tr '\n' ' ')
             details=${details//%/%25}
             details=${details//$'\r'/%0D}
             echo "::error title=cargo audit failure::$details"
