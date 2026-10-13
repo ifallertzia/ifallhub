@@ -27,7 +27,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "ci-hygiene"
-      - run: cargo fmt --check
+      - name: Check Rust formatting
+        run: |
+          set +e
+          cargo fmt --check > /tmp/cargo-fmt.log 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            cat /tmp/cargo-fmt.log
+            {
+              echo '### cargo fmt --check output'
+              echo '```text'
+              cat /tmp/cargo-fmt.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$status"
+          fi
       - name: Validate Unix installer syntax
         run: |
           if [ -f install.sh ]; then
