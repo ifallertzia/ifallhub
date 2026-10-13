@@ -518,6 +518,7 @@ export async function autoPlay({ item, title, year, order, season, episode, isSe
           { signal },
         );
         if (signal.aborted) return { cancelled: true };
+        hooks.onPlayback?.({ playback, release, provider, mirrorIndex });
         const result = await openStream({
           playback,
           video,

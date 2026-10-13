@@ -727,3 +727,10 @@ h1, h2, h3, p { margin: 0; }
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
+
+/* Resolved playback URLs remain visible across server/mirror fallback. */
+.playback-links { margin-bottom: 20px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.playback-links h3 { margin: 0 0 8px; }
+.playback-link-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+.playback-link-main { flex: 1 1 240px; min-width: 0; display: grid; gap: 6px; overflow-wrap: anywhere; }
+.playback-link-url { width: 100%; min-width: 0; box-sizing: border-box; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; }
