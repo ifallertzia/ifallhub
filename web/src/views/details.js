@@ -279,6 +279,8 @@ async function loadStreams() {
       season: state.season,
       episode: state.episode,
       isSeries: state.details?.media_type === 'series' || (state.details?.seasons || []).length > 0,
+      expectedTitle: state.details?.title || '',
+      expectedYear: state.details?.year || '',
     });
     state.entry = buildStreamEntry(state.provider, { id: { provider: state.provider, value: state.id }, title: state.details?.title }, response);
     const releases = state.entry.releases;

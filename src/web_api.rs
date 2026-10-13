@@ -61,6 +61,10 @@ const MAX_HOMEPAGE_PAGES: usize = 8;
 const RATING_TTL: Duration = Duration::from_secs(60 * 60);
 const MAX_RATING_CACHE: usize = 4096;
 const MAX_BATCH_IDS: usize = 12;
+const SUBTITLE_SET_TTL: Duration = Duration::from_secs(15 * 60);
+const MAX_SUBTITLE_SETS: usize = 512;
+const MAX_SUBTITLE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SUBTITLE_REDIRECTS: usize = 3;
 /// Server-sent events keep-alive interval; short enough to notice a dropped
 /// socket, long enough to stay out of the client's way.
 const EVENT_KEEPALIVE: Duration = Duration::from_secs(20);
@@ -70,7 +74,9 @@ type Headers = HashMap<String, String>;
 struct WebState {
     service: MovieBoxService,
     media_client: reqwest::Client,
+    subtitle_client: reqwest::Client,
     stream_sets: Mutex<HashMap<String, CachedStreamSet>>,
+    subtitle_sets: Mutex<HashMap<String, CachedSubtitleSet>>,
     playbacks: Mutex<HashMap<String, WebPlayback>>,
     access_token: Option<String>,
     rate_per_minute: u32,
@@ -111,6 +117,12 @@ struct CachedStreamSet {
     releases: Vec<Release>,
 }
 
+#[derive(Clone)]
+struct CachedSubtitleSet {
+    created_at: Instant,
+    options: Vec<crate::providers::models::SubtitleOption>,
+}
+
 struct WebPlayback {
     created_at: Instant,
     source: PlaybackSource,
@@ -148,6 +160,16 @@ impl WebState {
             .tcp_keepalive(Duration::from_secs(30))
             .build()
             .unwrap_or_default();
+        // Caption URLs are fetched server-side to avoid CORS in browsers. Do
+        // not automatically follow redirects: every hop must pass the same
+        // MovieBox CDN validation as the original URL.
+        let subtitle_client = crate::net::http_client_builder_base()
+            .pool_max_idle_per_host(8)
+            .timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(8))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_default();
         let access_token = std::env::var("MOVIEBOX_WEB_API_TOKEN")
             .ok()
             .map(|value| value.trim().to_string())
@@ -159,7 +181,9 @@ impl WebState {
         Self {
             service: MovieBoxService::new(),
             media_client,
+            subtitle_client,
             stream_sets: Mutex::new(HashMap::new()),
+            subtitle_sets: Mutex::new(HashMap::new()),
             playbacks: Mutex::new(HashMap::new()),
             access_token,
             rate_per_minute,
@@ -511,6 +535,12 @@ async fn route_api(request: &HttpRequest, state: &WebState) -> HttpResponse {
         }
         "/api/streams" if request.method == "GET" || request.method == "HEAD" => {
             streams(query, state).await
+        }
+        "/api/subtitles" if request.method == "GET" || request.method == "HEAD" => {
+            search_subtitles(query, state).await
+        }
+        "/api/subtitle-file" if request.method == "GET" || request.method == "HEAD" => {
+            subtitle_file(query, state).await
         }
         "/api/play" if request.method == "POST" => play(request, state).await,
         "/api/suggest" if request.method == "GET" || request.method == "HEAD" => {
@@ -1281,14 +1311,76 @@ async fn streams(query: &str, state: &WebState) -> HttpResponse {
         || id.starts_with("series:")
         || id.starts_with("tv:")
         || id.starts_with("anime:");
+    let expected_title = params
+        .get("expected_title")
+        .map(String::as_str)
+        .unwrap_or_default()
+        .trim();
+    let expected_year = params
+        .get("expected_year")
+        .map(String::as_str)
+        .unwrap_or_default()
+        .trim();
+    if expected_title.len() > 200 || expected_year.len() > 32 {
+        return HttpResponse::error(400, "Expected title metadata is too long");
+    }
+
+    // Verify the provider page behind the selected id before fetching links.
+    // Use its own title as the baseline for older API clients that do not pass
+    // the requested title explicitly.
+    let details = match state.service.details_typed(provider, id).await {
+        Ok(details) => details,
+        Err(error) => {
+            log::warn!("{provider} title verification failed for stream request: {error}");
+            return HttpResponse::error(
+                404,
+                "No playable streams found: the provider title could not be verified",
+            );
+        }
+    };
+    let title_to_verify = if expected_title.is_empty() {
+        details.title.as_str()
+    } else {
+        expected_title
+    };
+    let year_to_verify = if expected_year.is_empty() {
+        details.year.as_deref()
+    } else {
+        Some(expected_year)
+    };
+    if !expected_title.is_empty()
+        && !crate::providers::title_match::titles_match(
+            expected_title,
+            &details.title,
+            year_to_verify,
+            details.year.as_deref(),
+        )
+    {
+        log::warn!("{provider} stream request rejected because the provider title did not match");
+        return HttpResponse::error(
+            404,
+            "No playable streams found: provider title did not match the requested title",
+        );
+    }
 
     let mut releases =
         match fetch_releases(&state.service, provider, id, season, episode, is_series).await {
             Ok(releases) => releases,
             Err(message) => return HttpResponse::error(502, message),
         };
+    releases.retain(|release| {
+        crate::providers::title_match::release_title_matches(
+            title_to_verify,
+            &release.filename,
+            year_to_verify,
+        )
+        .unwrap_or(true)
+    });
     if releases.is_empty() {
-        return HttpResponse::error(404, "No playable streams found for this title");
+        return HttpResponse::error(
+            404,
+            "No playable streams found for this title",
+        );
     }
     // Sort releases to bring best playable links to top (fixes video-only/audio-only by prioritizing reliable providers)
     releases.sort_by(|a, b| {
@@ -1355,6 +1447,196 @@ async fn streams(query: &str, state: &WebState) -> HttpResponse {
             "releases": public_releases,
         }),
     )
+}
+
+async fn search_subtitles(query: &str, state: &WebState) -> HttpResponse {
+    let params = parse_query(query);
+    let title = params
+        .get("title")
+        .map(String::as_str)
+        .unwrap_or_default()
+        .trim();
+    let year = params
+        .get("year")
+        .map(String::as_str)
+        .unwrap_or_default()
+        .trim();
+    if title.is_empty() || title.len() > 200 || year.len() > 32 {
+        return HttpResponse::error(400, "A valid title and optional year are required");
+    }
+
+    let season = parse_usize(params.get("season"), 0, 500);
+    let episode = parse_usize(params.get("episode"), 0, 5000);
+    if (season == 0) != (episode == 0) {
+        return HttpResponse::error(400, "Season and episode must both be provided");
+    }
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(45),
+        state.service.search_captions_by_title(
+            title,
+            (!year.is_empty()).then_some(year),
+            season,
+            episode,
+        ),
+    )
+    .await;
+    let options = match result {
+        Ok(Ok(options)) => options,
+        Ok(Err(error)) => {
+            log::warn!("subtitle search failed for requested title: {error}");
+            return HttpResponse::error(502, "Online subtitle search is temporarily unavailable");
+        }
+        Err(_) => return HttpResponse::error(504, "Online subtitle search timed out"),
+    };
+
+    // Only retain MovieBox caption CDN URLs. URLs stay server-side and each
+    // redirect is checked again before a subtitle file is fetched.
+    let options = options
+        .into_iter()
+        .filter(|option| validate_moviebox_caption_url(&option.url).is_ok())
+        .take(32)
+        .collect::<Vec<_>>();
+    let mut subtitle_set_id = None;
+    if !options.is_empty() {
+        let token = opaque_token();
+        let mut sets = state.subtitle_sets.lock().await;
+        sets.retain(|_, value| value.created_at.elapsed() < SUBTITLE_SET_TTL);
+        if sets.len() >= MAX_SUBTITLE_SETS {
+            if let Some(oldest) = sets
+                .iter()
+                .min_by_key(|(_, value)| value.created_at)
+                .map(|(key, _)| key.clone())
+            {
+                sets.remove(&oldest);
+            }
+        }
+        sets.insert(
+            token.clone(),
+            CachedSubtitleSet {
+                created_at: Instant::now(),
+                options: options.clone(),
+            },
+        );
+        subtitle_set_id = Some(token);
+    }
+
+    HttpResponse::json(
+        200,
+        json!({
+            "subtitle_set_id": subtitle_set_id,
+            "subtitles": options
+                .iter()
+                .enumerate()
+                .map(|(index, option)| json!({ "index": index, "name": option.name }))
+                .collect::<Vec<_>>(),
+        }),
+    )
+}
+
+async fn subtitle_file(query: &str, state: &WebState) -> HttpResponse {
+    let params = parse_query(query);
+    let set_id = params
+        .get("set_id")
+        .map(String::as_str)
+        .unwrap_or_default()
+        .trim();
+    let index = params
+        .get("index")
+        .and_then(|value| value.parse::<usize>().ok());
+    if set_id.len() != 32 || !set_id.chars().all(|character| character.is_ascii_hexdigit()) {
+        return HttpResponse::error(400, "A valid subtitle search id is required");
+    }
+    let Some(index) = index else {
+        return HttpResponse::error(400, "A valid subtitle language selection is required");
+    };
+
+    let option = {
+        let mut sets = state.subtitle_sets.lock().await;
+        sets.retain(|_, value| value.created_at.elapsed() < SUBTITLE_SET_TTL);
+        match sets.get(set_id) {
+            Some(set) => match set.options.get(index) {
+                Some(option) => option.clone(),
+                None => return HttpResponse::error(400, "Selected subtitle does not exist"),
+            },
+            None => return HttpResponse::error(410, "Subtitle search expired; search again"),
+        }
+    };
+
+    let text = match fetch_moviebox_caption(&state.subtitle_client, &option.url).await {
+        Ok(text) => text,
+        Err(message) => return HttpResponse::error(502, message),
+    };
+    HttpResponse::json(200, json!({ "text": text }))
+}
+
+async fn fetch_moviebox_caption(client: &reqwest::Client, raw_url: &str) -> Result<String, String> {
+    let mut url = validate_moviebox_caption_url(raw_url)?;
+    for redirect_count in 0..=MAX_SUBTITLE_REDIRECTS {
+        let response = client
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|_| "Could not download this subtitle file".to_string())?;
+        if response.status().is_redirection() {
+            if redirect_count == MAX_SUBTITLE_REDIRECTS {
+                return Err("Subtitle source redirected too many times".to_string());
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| "Subtitle source returned an invalid redirect".to_string())?;
+            url = validate_moviebox_caption_url(
+                url.join(location)
+                    .map_err(|_| "Subtitle source returned an invalid redirect".to_string())?
+                    .as_str(),
+            )?;
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(format!(
+                "Subtitle source returned HTTP {}",
+                response.status().as_u16()
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_SUBTITLE_BYTES as u64)
+        {
+            return Err("Subtitle file is too large".to_string());
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| "Could not read this subtitle file".to_string())?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_SUBTITLE_BYTES {
+                return Err("Subtitle file is too large".to_string());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    Err("Subtitle source redirected too many times".to_string())
+}
+
+fn validate_moviebox_caption_url(raw_url: &str) -> Result<Url, String> {
+    let url = Url::parse(raw_url).map_err(|_| "Subtitle source returned an invalid URL".to_string())?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return Err("Subtitle source returned an unsafe URL".to_string());
+    }
+    let Some(host) = url.host_str() else {
+        return Err("Subtitle source returned an invalid URL".to_string());
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let is_moviebox_cdn = ["aoneroom.com", "inmoviebox.com"]
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")));
+    if host.parse::<std::net::IpAddr>().is_ok() || !is_moviebox_cdn {
+        return Err("Subtitle source is not a trusted MovieBox CDN".to_string());
+    }
+    Ok(url)
 }
 
 async fn fetch_releases(
@@ -2243,6 +2525,22 @@ mod tests {
     }
 
     #[test]
+    fn subtitle_urls_are_limited_to_moviebox_https_cdns() {
+        assert!(validate_moviebox_caption_url(
+            "https://pacdn.aoneroom.com/other/captions/en.srt"
+        )
+        .is_ok());
+        assert!(validate_moviebox_caption_url(
+            "https://captions.inmoviebox.com/en.vtt"
+        )
+        .is_ok());
+        assert!(validate_moviebox_caption_url("http://pacdn.aoneroom.com/en.srt").is_err());
+        assert!(validate_moviebox_caption_url("https://aoneroom.com.evil.test/en.srt").is_err());
+        assert!(validate_moviebox_caption_url("https://127.0.0.1/private.srt").is_err());
+        assert!(validate_moviebox_caption_url("https://user@pacdn.aoneroom.com/en.srt").is_err());
+    }
+
+    #[test]
     fn media_route_rejects_non_http_targets_and_userinfo() {
         assert!(parse_media_target("/api/media/token/file/example.test/path").is_none());
         assert!(parse_media_target("/api/media/token/https/user@example.test/path").is_none());
@@ -2387,7 +2685,9 @@ mod tests {
         let state = WebState {
             service: MovieBoxService::new(),
             media_client: reqwest::Client::new(),
+            subtitle_client: reqwest::Client::new(),
             stream_sets: Mutex::new(HashMap::new()),
+            subtitle_sets: Mutex::new(HashMap::new()),
             playbacks: Mutex::new(HashMap::from([(
                 "sesstoken".to_string(),
                 WebPlayback {
@@ -2478,7 +2778,9 @@ mod tests {
         let state = WebState {
             service: MovieBoxService::new(),
             media_client: reqwest::Client::new(),
+            subtitle_client: reqwest::Client::new(),
             stream_sets: Mutex::new(HashMap::new()),
+            subtitle_sets: Mutex::new(HashMap::new()),
             playbacks: Mutex::new(HashMap::from([(
                 "hls-token".to_string(),
                 WebPlayback {

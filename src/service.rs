@@ -63,9 +63,13 @@ impl MovieBoxService {
     }
 
     pub async fn suggest(&self, query: &str) -> Result<Vec<String>, String> {
+        let query = crate::providers::title_match::sanitize_provider_query(query);
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
         let payload = self
             .client
-            .suggest(query)
+            .suggest(&query)
             .await
             .map_err(|e| e.to_string())?;
         Ok(crate::providers::moviebox::adapt::moviebox_suggest_json_to_strings(&payload))
@@ -77,22 +81,26 @@ impl MovieBoxService {
         query: &str,
         page: usize,
     ) -> Result<Vec<CatalogItem>, ProviderError> {
+        let query = crate::providers::title_match::sanitize_provider_query(query);
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
         match provider {
-            ProviderKind::MovieBox => Provider::search(&self.client, query, page).await,
+            ProviderKind::MovieBox => Provider::search(&self.client, &query, page).await,
             ProviderKind::FourKHdHub => {
                 let fourk = self.fourk_client.as_ref().ok_or_else(|| {
                     ProviderError::Unavailable("4KHDHub is unavailable".to_string())
                 })?;
-                Provider::search(fourk, query, page).await
+                Provider::search(fourk, &query, page).await
             }
             ProviderKind::BdixCircleFtp => {
-                Provider::search(&self.circleftp_client, query, page).await
+                Provider::search(&self.circleftp_client, &query, page).await
             }
             ProviderKind::BdixDhakaFlix => {
-                Provider::search(&self.dhakaflix_client, query, page).await
+                Provider::search(&self.dhakaflix_client, &query, page).await
             }
-            ProviderKind::Addons => Provider::search(&self.addon_client, query, page).await,
-            ProviderKind::Dramachi => Provider::search(&self.dramachi_client, query, page).await,
+            ProviderKind::Addons => Provider::search(&self.addon_client, &query, page).await,
+            ProviderKind::Dramachi => Provider::search(&self.dramachi_client, &query, page).await,
         }
     }
 
@@ -300,6 +308,174 @@ impl MovieBoxService {
         }
 
         Ok(deduplicated)
+    }
+
+    /// Find MovieBox captions from a display title, so clients that do not
+    /// already have MovieBox subject/resource ids (notably the web player when
+    /// it is playing another provider) can still offer subtitle selection.
+    pub async fn search_captions_by_title(
+        &self,
+        title: &str,
+        year: Option<&str>,
+        season: usize,
+        episode: usize,
+    ) -> Result<Vec<crate::providers::models::SubtitleOption>, String> {
+        let title = title.trim();
+        if title.is_empty() || title.len() > 200 {
+            return Ok(Vec::new());
+        }
+
+        let year = year
+            .map(crate::providers::models::extract_4digit_year)
+            .filter(|value| !value.is_empty());
+        let query = match year.as_deref() {
+            Some(year) if !title.contains(year) => format!("{title} {year}"),
+            _ => title.to_string(),
+        };
+        let candidates = self
+            .search_typed(ProviderKind::MovieBox, &query, 1)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let page = if episode > 0 {
+            (episode - 1) / 20 + 1
+        } else {
+            1
+        };
+        let mut checked_ids = std::collections::HashSet::new();
+
+        for candidate in candidates.into_iter().take(12) {
+            if candidate.id.provider != ProviderKind::MovieBox
+                || !crate::providers::title_match::titles_match(
+                    title,
+                    &candidate.title,
+                    year.as_deref(),
+                    candidate.year.as_deref(),
+                )
+                || !checked_ids.insert(candidate.id.value.clone())
+            {
+                continue;
+            }
+
+            // Search results are only a hint. Verify the title against its
+            // detail page before using the provider's resource ids.
+            let details = match self
+                .details_typed(ProviderKind::MovieBox, &candidate.id.value)
+                .await
+            {
+                Ok(details) => details,
+                Err(_) => continue,
+            };
+            if !crate::providers::title_match::titles_match(
+                title,
+                &details.title,
+                year.as_deref(),
+                details.year.as_deref(),
+            ) || ((season > 0 || episode > 0) && !details.is_series())
+            {
+                continue;
+            }
+
+            let sibling_ids = details.sibling_ids();
+            let resources = futures::future::join_all(sibling_ids.iter().map(|subject_id| async {
+                let page_result = self
+                    .client
+                    .fetch_resource_page(subject_id, season, episode, 0, page)
+                    .await;
+                (subject_id.clone(), page_result)
+            }))
+            .await;
+
+            let mut resources_to_try = Vec::new();
+            let mut seen_resources = std::collections::HashSet::new();
+            for (subject_id, result) in resources {
+                let Ok((items, _)) = result else { continue };
+                for item in &items {
+                    if find_matching_resource_item(std::slice::from_ref(item), season, episode)
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    let Some(resource_id) = item
+                        .get("resourceId")
+                        .or_else(|| item.get("id"))
+                        .and_then(|value| {
+                            value
+                                .as_str()
+                                .map(str::to_string)
+                                .or_else(|| value.as_u64().map(|number| number.to_string()))
+                                .or_else(|| value.as_i64().map(|number| number.to_string()))
+                        })
+                        .filter(|value| !value.trim().is_empty())
+                    else {
+                        continue;
+                    };
+                    let key = (subject_id.clone(), resource_id.clone());
+                    if seen_resources.insert(key.clone()) {
+                        resources_to_try.push(key);
+                    }
+                    if resources_to_try.len() >= 6 {
+                        break;
+                    }
+                }
+                if resources_to_try.len() >= 6 {
+                    break;
+                }
+            }
+
+            for (subject_id, resource_id) in &resources_to_try {
+                if let Ok(captions) = self
+                    .get_ext_captions(
+                        subject_id,
+                        resource_id,
+                        &sibling_ids,
+                        season,
+                        episode,
+                    )
+                    .await
+                    && !captions.is_empty()
+                {
+                    return Ok(captions);
+                }
+            }
+
+            // Some MovieBox versions expose only play-info stream ids. Try a
+            // small fallback set if the resource list did not yield captions.
+            let play_info = self
+                .client
+                .get_play_info(&candidate.id.value, season, episode)
+                .await;
+            if let Ok(payload) = play_info {
+                let play_releases =
+                    crate::providers::moviebox::adapt::moviebox_play_info_json_to_releases(
+                        &payload,
+                        season,
+                        episode,
+                        self.client.user_agent(),
+                    );
+                for release in play_releases.into_iter().take(3) {
+                    let Some(resource_id) = release.resource_id.filter(|value| !value.is_empty())
+                    else {
+                        continue;
+                    };
+                    if let Ok(captions) = self
+                        .get_ext_captions(
+                            &candidate.id.value,
+                            &resource_id,
+                            &sibling_ids,
+                            season,
+                            episode,
+                        )
+                        .await
+                        && !captions.is_empty()
+                    {
+                        return Ok(captions);
+                    }
+                }
+            }
+        }
+
+        Ok(Vec::new())
     }
 
     fn append_unique_captions(

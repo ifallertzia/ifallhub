@@ -13,6 +13,8 @@ import {
   providerLabel,
 } from '../lib/format.js';
 import { rankRelated, similarByMeta } from '../lib/recommend.js';
+import { subtitleLanguageTag, subtitleToVtt } from '../player/subtitles.js';
+import { mountPlayerOverlay } from '../player/overlay.js';
 import { app, cardMeta, ensureMeta, rememberGenres } from '../state.js';
 import { navigate, titlePath, watchPath } from '../lib/router.js';
 import {
@@ -48,15 +50,32 @@ const state = {
   selected: 0,
   quality: 'AUTO',
   source: '',
+  playingTitle: '',
+  playerControls: null,
   resumeAt: 0,
   progressTimer: 0,
   autoplayNext: true,
+  subtitleSearchController: null,
+  subtitleSetId: '',
+  subtitleOptions: [],
+  selectedSubtitleIndex: null,
+  subtitleText: '',
+  subtitleLoadId: 0,
+  subtitleObjectUrl: '',
+  subtitleTrack: null,
+  subtitleNode: null,
 };
 
 export async function renderWatch(container, route) {
-  stop();
+  await stop();
   state.provider = route.params.provider;
   state.id = route.params.id;
+  state.title = 'Now playing';
+  state.playingTitle = '';
+  state.quality = 'AUTO';
+  state.source = '';
+  state.details = null;
+  state.isSeries = false;
   state.season = Number(route.query.get('s') || 0);
   state.episode = Number(route.query.get('e') || 0);
   state.cache = {};
@@ -64,24 +83,19 @@ export async function renderWatch(container, route) {
   state.entry = null;
   state.selected = 0;
   state.resumeAt = 0;
+  state.subtitleSearchController?.abort();
+  state.subtitleSearchController = null;
+  state.subtitleSetId = '';
+  state.subtitleOptions = [];
+  state.selectedSubtitleIndex = null;
+  state.subtitleText = '';
+  state.subtitleLoadId += 1;
 
   container.innerHTML = `
     <div class="page-shell watch" data-view="watch">
-      <header class="watch-topbar">
-        <button class="ghost-button" type="button" data-back>← Back</button>
-        <div class="watch-heading">
-          <p class="kicker">NOW PLAYING</p>
-          <h1 id="watch-title">Preparing stream…</h1>
-        </div>
-        <div class="watch-badges">
-          <span class="badge" id="watch-quality">AUTO</span>
-          <span class="badge" id="watch-source">SOURCE</span>
-        </div>
-      </header>
-
       <div class="player-stage">
-        <div class="video-frame">
-          <video id="video" controls playsinline preload="metadata" aria-label="Playback"></video>
+        <div class="video-frame" id="player-frame" data-orientation="landscape">
+          <video id="video" playsinline preload="metadata" aria-label="Video playback"></video>
           <div class="video-overlay" id="video-overlay" hidden>
             <div class="overlay-mark">!</div>
             <h3>Playback couldn't start</h3>
@@ -114,14 +128,42 @@ export async function renderWatch(container, route) {
     </div>`;
 
   bind(container);
+  const frame = container.querySelector('#player-frame');
+  const video = container.querySelector('#video');
+  state.playerControls = mountPlayerOverlay({
+    frame,
+    video,
+    getPlayer: () => state.player,
+    getTitle: () => state.playingTitle || state.title,
+    getQuality: () => state.quality,
+    getDecoder: () => state.entry?.releases?.[state.selected]?.codec || 'AUTO',
+    getSource: () => state.source,
+    getReleases: () => state.entry?.releases || [],
+    getSelectedRelease: () => state.selected,
+    getSubtitleOptions: () => state.subtitleOptions,
+    getSelectedSubtitle: () => state.selectedSubtitleIndex,
+    getChapters: () => state.details?.chapters || [],
+    getCanPrevious: () => Boolean(previousEpisode()),
+    getCanNext: () => Boolean(nextEpisode()),
+    onBack: () => navigate(titlePath(state.provider, state.id)),
+    onPrevious: () => {
+      const previous = previousEpisode();
+      if (previous) navigate(watchPath(state.provider, state.id, previous));
+    },
+    onNext: () => {
+      const next = nextEpisode();
+      if (next) navigate(watchPath(state.provider, state.id, next));
+    },
+    onSearchSubtitles: (button) => searchSubtitles(button),
+    onSelectSubtitle: (value) => chooseSubtitle(value),
+    onSelectRelease: (index) => playManual(index),
+    onStatus: (message) => setStatus(message, false),
+  });
   await loadDetails();
   await startRotation();
 }
 
 function bind(container) {
-  container.querySelector('[data-back]')?.addEventListener('click', () => {
-    navigate(titlePath(state.provider, state.id));
-  });
   container.querySelector('[data-retry-server]')?.addEventListener('click', () => {
     hideOverlay();
     startRotation({ startAfter: state.current || undefined });
@@ -155,6 +197,200 @@ function bind(container) {
   });
 }
 
+function setSubtitleStatus(message) {
+  const status = document.querySelector('#subtitle-status');
+  if (status) status.textContent = message;
+}
+
+function subtitleOption(index) {
+  return state.subtitleOptions.find((option) => Number(option.index) === Number(index));
+}
+
+async function searchSubtitles(button) {
+  const title = state.details?.title || state.title;
+  if (!title || title === 'Now playing') {
+    setSubtitleStatus('This title could not be identified for subtitle search.');
+    return;
+  }
+
+  state.subtitleSearchController?.abort();
+  state.subtitleLoadId += 1;
+  if (state.selectedSubtitleIndex !== null && !state.subtitleText) {
+    state.selectedSubtitleIndex = null;
+    const select = document.querySelector('#subtitle-language');
+    if (select) select.value = '';
+  }
+  const controller = new AbortController();
+  state.subtitleSearchController = controller;
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Searching…';
+  setSubtitleStatus(`Searching online captions for ${title}…`);
+
+  try {
+    const payload = await api.subtitles({
+      title,
+      year: state.details?.year || '',
+      season: state.isSeries ? state.season : 0,
+      episode: state.isSeries ? state.episode : 0,
+    }, { signal: controller.signal });
+    if (controller.signal.aborted || state.subtitleSearchController !== controller) return;
+
+    clearActiveSubtitle();
+    state.subtitleLoadId += 1;
+    state.subtitleSetId = payload.subtitle_set_id || '';
+    state.subtitleOptions = (payload.subtitles || []).map((option, order) => ({
+      index: Number.isInteger(Number(option.index)) ? Number(option.index) : order,
+      name: String(option.name || 'Unknown'),
+    }));
+    state.selectedSubtitleIndex = null;
+    state.subtitleText = '';
+
+    const select = document.querySelector('#subtitle-language');
+    if (select) {
+      select.replaceChildren(new Option('Subtitles off', ''));
+      for (const option of state.subtitleOptions) {
+        select.add(new Option(option.name, String(option.index)));
+      }
+      select.value = '';
+      select.disabled = !state.subtitleSetId || state.subtitleOptions.length === 0;
+    }
+
+    if (!state.subtitleSetId || state.subtitleOptions.length === 0) {
+      setSubtitleStatus('No online subtitles were found for this title or episode. Playback will continue without captions.');
+    } else {
+      setSubtitleStatus(`${state.subtitleOptions.length} subtitle language${state.subtitleOptions.length === 1 ? '' : 's'} found. Choose one to turn captions on.`);
+    }
+  } catch (error) {
+    if (error?.name !== 'AbortError' && state.subtitleSearchController === controller) {
+      setSubtitleStatus('Online subtitle search is unavailable right now. Playback will continue without captions.');
+    }
+  } finally {
+    if (state.subtitleSearchController === controller) {
+      state.subtitleSearchController = null;
+      button.disabled = false;
+      button.textContent = originalLabel || 'CC Find subtitles';
+    }
+  }
+}
+
+async function chooseSubtitle(value) {
+  if (!value) {
+    state.subtitleLoadId += 1;
+    state.selectedSubtitleIndex = null;
+    state.subtitleText = '';
+    clearActiveSubtitle();
+    setSubtitleStatus('Subtitles off.');
+    return;
+  }
+
+  const index = Number(value);
+  const option = subtitleOption(index);
+  if (!option || !state.subtitleSetId) return;
+  const loadId = ++state.subtitleLoadId;
+  state.selectedSubtitleIndex = index;
+  state.subtitleText = '';
+  clearActiveSubtitle();
+  setSubtitleStatus(`Loading ${option.name} subtitles…`);
+
+  try {
+    const payload = await api.subtitleFile({ setId: state.subtitleSetId, index });
+    if (loadId !== state.subtitleLoadId || state.selectedSubtitleIndex !== index) return;
+    state.subtitleText = subtitleToVtt(payload.text);
+    await activateSelectedSubtitle(loadId);
+  } catch (error) {
+    if (loadId !== state.subtitleLoadId) return;
+    state.selectedSubtitleIndex = null;
+    state.subtitleText = '';
+    const select = document.querySelector('#subtitle-language');
+    if (select) select.value = '';
+    clearActiveSubtitle();
+    setSubtitleStatus(`${option.name} subtitles could not be loaded. Playback will continue without captions.`);
+  }
+}
+
+function clearActiveSubtitle() {
+  if (state.player && state.subtitleTrack && typeof state.player.selectTextTrack === 'function') {
+    try {
+      state.player.selectTextTrack(null);
+    } catch {
+      /* The player may already be unloading. */
+    }
+  }
+  state.subtitleNode?.remove();
+  if (state.subtitleObjectUrl) URL.revokeObjectURL(state.subtitleObjectUrl);
+  state.subtitleTrack = null;
+  state.subtitleNode = null;
+  state.subtitleObjectUrl = '';
+}
+
+async function activateSelectedSubtitle(loadId = state.subtitleLoadId) {
+  if (loadId !== state.subtitleLoadId || state.selectedSubtitleIndex === null || !state.subtitleText) return;
+  const video = document.querySelector('#video');
+  const option = subtitleOption(state.selectedSubtitleIndex);
+  if (!video || !option) return;
+  if (!video.currentSrc || video.readyState === 0) {
+    setSubtitleStatus(`${option.name} subtitles are ready and will appear when playback starts.`);
+    return;
+  }
+
+  clearActiveSubtitle();
+  const objectUrl = URL.createObjectURL(new Blob([state.subtitleText], { type: 'text/vtt;charset=utf-8' }));
+  state.subtitleObjectUrl = objectUrl;
+  const language = subtitleLanguageTag(option.name);
+  const player = state.player;
+
+  if (player && typeof player.addTextTrackAsync === 'function') {
+    try {
+      const track = await player.addTextTrackAsync(
+        objectUrl,
+        language,
+        'subtitles',
+        'text/vtt',
+        undefined,
+        option.name,
+      );
+      if (loadId !== state.subtitleLoadId || player !== state.player) {
+        URL.revokeObjectURL(objectUrl);
+        if (state.subtitleObjectUrl === objectUrl) state.subtitleObjectUrl = '';
+        return;
+      }
+      player.selectTextTrack(track);
+      state.subtitleTrack = track;
+      setSubtitleStatus(`${option.name} subtitles on.`);
+    } catch {
+      if (state.subtitleObjectUrl === objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+        state.subtitleObjectUrl = '';
+      }
+      if (loadId === state.subtitleLoadId) {
+        setSubtitleStatus(`${option.name} subtitles could not be attached to this stream.`);
+      }
+    }
+    return;
+  }
+
+  const track = document.createElement('track');
+  track.kind = 'subtitles';
+  track.label = option.name;
+  track.srclang = language === 'und' ? 'en' : language;
+  track.src = objectUrl;
+  track.default = true;
+  track.addEventListener('load', () => {
+    if (loadId === state.subtitleLoadId && track.track) track.track.mode = 'showing';
+  }, { once: true });
+  video.appendChild(track);
+  state.subtitleNode = track;
+  if (track.track) track.track.mode = 'showing';
+  setSubtitleStatus(`${option.name} subtitles on.`);
+}
+
+function handlePlayerReady(player) {
+  state.player = player;
+  state.playerControls?.refresh();
+  void activateSelectedSubtitle();
+}
+
 async function loadDetails() {
   try {
     const details = await api.details({ provider: state.provider, id: state.id });
@@ -162,11 +398,13 @@ async function loadDetails() {
     app.details = details;
     rememberGenres(details);
     state.title = details.title || state.id;
+    if (!state.playingTitle) state.playingTitle = state.title;
     state.isSeries = details.media_type === 'series' || (details.seasons || []).length > 0;
     if (state.isSeries && !state.season) {
       state.season = Number(details.seasons?.[0]?.number || 1);
       state.episode = Number(details.seasons?.[0]?.episodes?.[0]?.number || 1);
     }
+    state.playerControls?.refresh();
     const heading = document.querySelector('#watch-details-title');
     if (heading) {
       heading.textContent = state.isSeries
@@ -247,7 +485,7 @@ async function loadRelated() {
 async function startRotation({ startAfter, startRelease = 0 } = {}) {
   const video = document.querySelector('#video');
   if (!video) return;
-  stop({ keepUi: true });
+  await stop({ keepUi: true });
 
   const runId = ++state.runId;
   const controller = new AbortController();
@@ -259,8 +497,14 @@ async function startRotation({ startAfter, startRelease = 0 } = {}) {
   setStatus(`Checking ${providerLabel(state.order[0])} first…`, true);
 
   const result = await autoPlay({
-    item: { id: { provider: state.provider, value: state.id }, title: state.title },
+    item: {
+      id: { provider: state.provider, value: state.id },
+      title: state.title,
+      year: state.details?.year || '',
+      media_type: state.details?.media_type || '',
+    },
     title: state.title,
+    year: state.details?.year || '',
     order: state.order,
     season: state.season,
     episode: state.episode,
@@ -282,23 +526,25 @@ async function startRotation({ startAfter, startRelease = 0 } = {}) {
         state.entry = entry;
         state.current = entry.provider;
         paintStreams();
+        state.playerControls?.refresh();
       },
       onSelect: (entry, index) => {
         state.selected = index;
         paintStreams();
+        state.playerControls?.refresh();
       },
       onStreams: (entry, index) => {
         state.entry = entry;
         state.selected = index;
         state.current = entry.provider;
         paintStreams();
+        state.playerControls?.refresh();
       },
-      onTrack: (player) => {
-        state.player = player;
-      },
+      onTrack: handlePlayerReady,
       onPlaying: ({ provider, release }) => {
         state.quality = String(release.quality || 'AUTO').toUpperCase();
         state.source = providerLabel(provider);
+        state.playerControls?.refresh();
         markWatchStarted();
       },
       currentPlayer: () => state.player,
@@ -317,7 +563,7 @@ async function startRotation({ startAfter, startRelease = 0 } = {}) {
 async function playManual(releaseIndex) {
   const video = document.querySelector('#video');
   if (!video || !state.entry) return;
-  stop({ keepUi: true });
+  await stop({ keepUi: true });
   const runId = ++state.runId;
   const controller = new AbortController();
   state.controller = controller;
@@ -344,9 +590,7 @@ async function playManual(releaseIndex) {
         playback,
         video,
         signal: controller.signal,
-        onTrack: (player) => {
-          state.player = player;
-        },
+        onTrack: handlePlayerReady,
       });
       if (result.played) {
         state.quality = String(target.quality || 'AUTO').toUpperCase();
@@ -373,8 +617,7 @@ async function playManual(releaseIndex) {
 // --- Progress tracking -----------------------------------------------------
 
 function markWatchStarted() {
-  document.querySelector('#watch-quality').textContent = state.quality;
-  document.querySelector('#watch-source').textContent = state.source;
+  state.playerControls?.refresh();
   saveProgress();
   window.clearInterval(state.progressTimer);
   state.progressTimer = window.setInterval(() => saveProgress(), 15000);
@@ -414,7 +657,26 @@ async function onEnded(video) {
   navigate(watchPath(state.provider, state.id, { season: next.season, episode: next.episode }));
 }
 
+function previousEpisode() {
+  if (!state.isSeries) return null;
+  const seasons = state.details?.seasons || [];
+  const seasonIndex = seasons.findIndex((entry) => Number(entry.number) === Number(state.season));
+  const season = seasons[seasonIndex];
+  const episodes = season?.episodes || [];
+  const index = episodes.findIndex((entry) => Number(entry.number) === Number(state.episode));
+  if (index > 0) {
+    return { season: Number(state.season), episode: Number(episodes[index - 1].number) };
+  }
+  const previousSeason = seasons[seasonIndex - 1];
+  if (previousSeason?.episodes?.length) {
+    const lastEpisode = previousSeason.episodes[previousSeason.episodes.length - 1];
+    return { season: Number(previousSeason.number), episode: Number(lastEpisode.number) };
+  }
+  return null;
+}
+
 function nextEpisode() {
+  if (!state.isSeries) return null;
   const seasons = state.details?.seasons || [];
   const season = seasons.find((entry) => Number(entry.number) === Number(state.season));
   const episodes = season?.episodes || [];
@@ -439,12 +701,10 @@ function setStatus(text, busy = false) {
 }
 
 function setHeader(title, quality, source) {
-  const heading = document.querySelector('#watch-title');
-  if (heading) heading.textContent = displayUiText(title);
-  const qualityEl = document.querySelector('#watch-quality');
-  if (qualityEl) qualityEl.textContent = String(quality || 'AUTO').toUpperCase();
-  const sourceEl = document.querySelector('#watch-source');
-  if (sourceEl) sourceEl.textContent = source || '';
+  state.playingTitle = displayUiText(title);
+  state.quality = String(quality || 'AUTO').toUpperCase();
+  state.source = source || '';
+  state.playerControls?.refresh();
 }
 
 function paintRotation() {
@@ -535,12 +795,31 @@ function hideOverlay() {
 
 async function stop({ keepUi = false } = {}) {
   state.runId += 1;
+  if (!keepUi) {
+    state.playerControls?.destroy();
+    state.playerControls = null;
+  }
   state.controller?.abort();
   state.controller = null;
   window.clearInterval(state.progressTimer);
   state.progressTimer = 0;
+  state.subtitleLoadId += 1;
+  clearActiveSubtitle();
+  if (!keepUi) {
+    state.subtitleSearchController?.abort();
+    state.subtitleSearchController = null;
+    state.subtitleSetId = '';
+    state.subtitleOptions = [];
+    state.selectedSubtitleIndex = null;
+    state.subtitleText = '';
+  } else if (state.selectedSubtitleIndex !== null && !state.subtitleText) {
+    state.selectedSubtitleIndex = null;
+    const select = document.querySelector('#subtitle-language');
+    if (select) select.value = '';
+    setSubtitleStatus('Subtitle loading was interrupted by the stream change. Choose the language again.');
+  }
   const video = document.querySelector('#video');
-  if (video && video.currentTime > 5) await saveProgress();
+  if (video && video.currentTime > 5) void saveProgress().catch(() => {});
   state.player = await closeActivePlayer(video, state.player);
   if (!keepUi) state.entry = null;
 }
