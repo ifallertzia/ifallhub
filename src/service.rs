@@ -425,13 +425,7 @@ impl MovieBoxService {
 
             for (subject_id, resource_id) in &resources_to_try {
                 if let Ok(captions) = self
-                    .get_ext_captions(
-                        subject_id,
-                        resource_id,
-                        &sibling_ids,
-                        season,
-                        episode,
-                    )
+                    .get_ext_captions(subject_id, resource_id, &sibling_ids, season, episode)
                     .await
                     && !captions.is_empty()
                 {

@@ -1377,10 +1377,7 @@ async fn streams(query: &str, state: &WebState) -> HttpResponse {
         .unwrap_or(true)
     });
     if releases.is_empty() {
-        return HttpResponse::error(
-            404,
-            "No playable streams found for this title",
-        );
+        return HttpResponse::error(404, "No playable streams found for this title");
     }
     // Sort releases to bring best playable links to top (fixes video-only/audio-only by prioritizing reliable providers)
     releases.sort_by(|a, b| {
@@ -1544,7 +1541,11 @@ async fn subtitle_file(query: &str, state: &WebState) -> HttpResponse {
     let index = params
         .get("index")
         .and_then(|value| value.parse::<usize>().ok());
-    if set_id.len() != 32 || !set_id.chars().all(|character| character.is_ascii_hexdigit()) {
+    if set_id.len() != 32
+        || !set_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
         return HttpResponse::error(400, "A valid subtitle search id is required");
     }
     let Some(index) = index else {
@@ -1622,7 +1623,8 @@ async fn fetch_moviebox_caption(client: &reqwest::Client, raw_url: &str) -> Resu
 }
 
 fn validate_moviebox_caption_url(raw_url: &str) -> Result<Url, String> {
-    let url = Url::parse(raw_url).map_err(|_| "Subtitle source returned an invalid URL".to_string())?;
+    let url =
+        Url::parse(raw_url).map_err(|_| "Subtitle source returned an invalid URL".to_string())?;
     if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
         return Err("Subtitle source returned an unsafe URL".to_string());
     }
@@ -2526,14 +2528,11 @@ mod tests {
 
     #[test]
     fn subtitle_urls_are_limited_to_moviebox_https_cdns() {
-        assert!(validate_moviebox_caption_url(
-            "https://pacdn.aoneroom.com/other/captions/en.srt"
-        )
-        .is_ok());
-        assert!(validate_moviebox_caption_url(
-            "https://captions.inmoviebox.com/en.vtt"
-        )
-        .is_ok());
+        assert!(
+            validate_moviebox_caption_url("https://pacdn.aoneroom.com/other/captions/en.srt")
+                .is_ok()
+        );
+        assert!(validate_moviebox_caption_url("https://captions.inmoviebox.com/en.vtt").is_ok());
         assert!(validate_moviebox_caption_url("http://pacdn.aoneroom.com/en.srt").is_err());
         assert!(validate_moviebox_caption_url("https://aoneroom.com.evil.test/en.srt").is_err());
         assert!(validate_moviebox_caption_url("https://127.0.0.1/private.srt").is_err());

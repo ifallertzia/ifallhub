@@ -83,8 +83,8 @@ fn strip_annotations(raw: &str, preserve_years: bool) -> String {
             _ => None,
         };
         if let Some(closing) = closing
-            && let Some(close_index) = (index + 1..chars.len())
-                .find(|candidate| chars[*candidate].1 == closing)
+            && let Some(close_index) =
+                (index + 1..chars.len()).find(|candidate| chars[*candidate].1 == closing)
         {
             let content_start = byte_index + character.len_utf8();
             let content_end = chars[close_index].0;
@@ -137,9 +137,11 @@ fn strip_trailing_metadata(value: &str) -> String {
         first_suffix -= 1;
     }
     if first_suffix < spans.len() && first_suffix > 0 {
-        return value[..spans[first_suffix].1].trim_end_matches(|c: char| {
-            c.is_whitespace() || matches!(c, '-' | '_' | '.' | ':' | '|')
-        }).to_string();
+        return value[..spans[first_suffix].1]
+            .trim_end_matches(|c: char| {
+                c.is_whitespace() || matches!(c, '-' | '_' | '.' | ':' | '|')
+            })
+            .to_string();
     }
     value.trim().to_string()
 }
@@ -240,10 +242,7 @@ fn release_year(value: &str, expected_tokens: &[String]) -> Option<String> {
         .into_iter()
         .map(|(token, _)| token)
         .find(|token| {
-            is_year_token(token)
-                && !expected_tokens
-                    .iter()
-                    .any(|expected| expected == token)
+            is_year_token(token) && !expected_tokens.iter().any(|expected| expected == token)
         })
 }
 
@@ -311,7 +310,10 @@ fn is_year_token(value: &str) -> bool {
 }
 
 fn is_ignored_title_word(value: &str) -> bool {
-    matches!(value, "the" | "a" | "an" | "of" | "and" | "in" | "on" | "to" | "for")
+    matches!(
+        value,
+        "the" | "a" | "an" | "of" | "and" | "in" | "on" | "to" | "for"
+    )
 }
 
 fn is_metadata_token(value: &str) -> bool {
@@ -319,8 +321,16 @@ fn is_metadata_token(value: &str) -> bool {
         || is_release_metadata_token(value)
         || matches!(
             value,
-            "dub" | "dubbed" | "audio" | "multi" | "dual" | "sub" | "subs" | "subtitle"
-                | "subtitles" | "version"
+            "dub"
+                | "dubbed"
+                | "audio"
+                | "multi"
+                | "dual"
+                | "sub"
+                | "subs"
+                | "subtitle"
+                | "subtitles"
+                | "version"
         )
 }
 
@@ -423,13 +433,55 @@ fn is_release_metadata_token(value: &str) -> bool {
     resolution
         || matches!(
             lower.as_str(),
-            "4k" | "8k" | "uhd" | "hd" | "sd" | "hdr" | "hdr10" | "dv" | "web" | "dl"
-                | "webdl" | "webrip" | "bluray" | "brrip" | "bdrip" | "hdrip" | "hdtv"
-                | "remux" | "hevc" | "h264" | "h265" | "x264" | "x265" | "av1" | "aac"
-                | "dts" | "mkv" | "mp4" | "avi" | "mov" | "wmv" | "flv" | "mp3" | "m4v"
-                | "webm" | "proper" | "repack" | "limited" | "internal" | "unknown" | "release"
-                | "file" | "video" | "stream" | "source" | "direct" | "download" | "link"
-        ) || (lower.starts_with('s')
+            "4k" | "8k"
+                | "uhd"
+                | "hd"
+                | "sd"
+                | "hdr"
+                | "hdr10"
+                | "dv"
+                | "web"
+                | "dl"
+                | "webdl"
+                | "webrip"
+                | "bluray"
+                | "brrip"
+                | "bdrip"
+                | "hdrip"
+                | "hdtv"
+                | "remux"
+                | "hevc"
+                | "h264"
+                | "h265"
+                | "x264"
+                | "x265"
+                | "av1"
+                | "aac"
+                | "dts"
+                | "mkv"
+                | "mp4"
+                | "avi"
+                | "mov"
+                | "wmv"
+                | "flv"
+                | "mp3"
+                | "m4v"
+                | "webm"
+                | "proper"
+                | "repack"
+                | "limited"
+                | "internal"
+                | "unknown"
+                | "release"
+                | "file"
+                | "video"
+                | "stream"
+                | "source"
+                | "direct"
+                | "download"
+                | "link"
+        )
+        || (lower.starts_with('s')
             && lower.contains('e')
             && lower.chars().any(|character| character.is_ascii_digit()))
 }
@@ -457,9 +509,18 @@ mod tests {
     #[test]
     fn sanitizes_language_suffixes_and_keeps_years() {
         assert_eq!(sanitize_provider_query("Drishyam 2 [Hindi]"), "Drishyam 2");
-        assert_eq!(sanitize_provider_query("Drishyam 2 (Hindi Dubbed)"), "Drishyam 2");
-        assert_eq!(sanitize_provider_query("Drishyam 2 [Hindi] [2022]"), "Drishyam 2 2022");
-        assert_eq!(sanitize_provider_query("Dune: Part Two (2024)"), "Dune: Part Two 2024");
+        assert_eq!(
+            sanitize_provider_query("Drishyam 2 (Hindi Dubbed)"),
+            "Drishyam 2"
+        );
+        assert_eq!(
+            sanitize_provider_query("Drishyam 2 [Hindi] [2022]"),
+            "Drishyam 2 2022"
+        );
+        assert_eq!(
+            sanitize_provider_query("Dune: Part Two (2024)"),
+            "Dune: Part Two 2024"
+        );
         assert_eq!(sanitize_provider_query("Hindi Medium"), "Hindi Medium");
     }
 
@@ -488,10 +549,30 @@ mod tests {
 
     #[test]
     fn tolerates_small_typos_and_title_annotations() {
-        assert!(titles_match("Interstelllar", "Interstellar (2014)", None, Some("2014")));
-        assert!(titles_match("The Batman", "Batman", Some("2022"), Some("2022")));
-        assert!(titles_match("Drishyam Two", "Drishyam 2", Some("2022"), Some("2022")));
-        assert!(!titles_match("Halloween", "Halloween", Some("1978"), Some("2018")));
+        assert!(titles_match(
+            "Interstelllar",
+            "Interstellar (2014)",
+            None,
+            Some("2014")
+        ));
+        assert!(titles_match(
+            "The Batman",
+            "Batman",
+            Some("2022"),
+            Some("2022")
+        ));
+        assert!(titles_match(
+            "Drishyam Two",
+            "Drishyam 2",
+            Some("2022"),
+            Some("2022")
+        ));
+        assert!(!titles_match(
+            "Halloween",
+            "Halloween",
+            Some("1978"),
+            Some("2018")
+        ));
     }
 
     #[test]
