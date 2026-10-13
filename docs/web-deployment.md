@@ -64,6 +64,7 @@ All configuration is environment-only. Secrets belong in the Render dashboard
 | `MOVIEBOX_API_ADDR` | `127.0.0.1:8787` | Loopback address of the spawned Rust API. |
 | `MOVIEBOX_WEB_LOCAL_PLAYER` | auto | `0` disables the "Open in VLC" handoff. By default the API can launch a detected VLC/mpv/IINA when it inherits a graphical session; a hosted container has neither, so the button copies the link instead. |
 | `MOVIEBOX_WEB_PLAYER_BASE` | bind address | Base URL the launched player uses to reach `/api/media/*`. Wildcard binds become `http://127.0.0.1:<port>`; set this when the player runs on another device. |
+| `MOVIEBOX_WYZIE_KEY` | unset | Optional free [Wyzie Subs](https://docs.wyzie.io/subs/intro) key. Set it to include Wyzie in the public subtitle fan-out; without it OpenSubtitles v3 and Podnapisi still answer. The key stays server-side. |
 | `MOVIEBOX_WEB_ROOT` | `web/dist` | Static asset root inside the container. |
 | `MOVIEBOX_LOG` | `info` | Rust log level (`off`…`trace`). |
 | `MOVIEBOX_FOURKHDHUB_URL` | unset | Custom 4KHDHub base URL (same as the TUI). |

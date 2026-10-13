@@ -115,6 +115,7 @@ async fn main() -> std::io::Result<()> {
         println!("    MOVIEBOX_WEB_API_RATE_PER_MIN Web API rate limit per client (0 disables)");
         println!("    MOVIEBOX_WEB_LOCAL_PLAYER 0 disables \"Open in VLC\" in the web player");
         println!("    MOVIEBOX_WEB_PLAYER_BASE Media URL base for the launched web player");
+        println!("    MOVIEBOX_WYZIE_KEY      Optional Wyzie key for public subtitle search");
         println!("    MOVIEBOX_NO_IMAGE       Disable poster image queries (1/true)");
         println!(
             "    MOVIEBOX_IMAGE_PROTOCOL Force graphics protocol (kitty, sixel, iterm2, none)"

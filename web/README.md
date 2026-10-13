@@ -98,6 +98,14 @@ Catalog and playback:
 - `GET /api/media/{session}/{scheme}/{host}/{path}` — short-lived, same-origin media proxy
 - `GET /api/player` — which local players (VLC, mpv, IINA, Android) this machine
   can launch, plus the reason when it cannot launch any
+- `GET /api/subtitles?title=…&year=…&season=0&episode=0` — caption search. The
+  engine's own MovieBox captions and the public providers are queried at the same
+  time and merged into one ranked list (English first, then Hindi, then the rest;
+  popularity breaks ties). Answers `{ subtitle_set_id, sources, subtitles: [{ index,
+  name, language, source, format, downloads, hearing_impaired }] }`.
+- `GET /api/subtitle-file?set_id=…&index=0` — downloads one entry and returns
+  `{ text, name, source, language }` as plain text (SRT/WebVTT/ASS; zip and gzip
+  archives are unpacked server-side).
 - `POST /api/player/open` with `{ "stream_set_id": "…", "release_index": 0,
   "player": "vlc", "resume_seconds": 754 }` — "Open in VLC": resolves the
   release and starts the player **on the machine running the API** on a loopback
@@ -118,6 +126,28 @@ Library (watchlist, progress, ratings):
 Every mutation response returns the whole library, so one round trip resyncs the
 client. Library data is stored in `web_library.json` under the data directory
 (override with `MOVIEBOX_DATA_DIR`).
+
+### Subtitles
+
+Captions come from public, key-free providers, always fetched by the Rust API
+(there is no CORS problem and no third-party key in the browser):
+
+- **OpenSubtitles v3** — the public Stremio add-on. The title is resolved to an
+  IMDb id through Cinemeta, then `/subtitles/movie/<id>.json` or
+  `/subtitles/series/<id>:<season>:<episode>.json` is queried.
+- **Podnapisi** — key-free XML search by title/year/season.
+- **Wyzie Subs** — joins the fan-out only when `MOVIEBOX_WYZIE_KEY` (or
+  `WYZIE_API_KEY`) is set, because it needs a free API key. The key stays on the
+  server.
+
+Provider results are merged with the engine's MovieBox captions, and every
+download is re-validated against an explicit provider host allowlist, even after
+redirects. The player turns the best match on automatically (English first, then
+Hindi) — switch it off with the "Load subtitles automatically" checkbox in the
+subtitle panel, or pick any language there.
+
+On phones the player collapses to one horizontal bar (play/pause + fullscreen);
+every other control lives inside fullscreen, which fills the whole screen.
 
 ## Layout
 

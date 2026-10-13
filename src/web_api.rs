@@ -124,7 +124,72 @@ struct CachedStreamSet {
 #[derive(Clone)]
 struct CachedSubtitleSet {
     created_at: Instant,
-    options: Vec<crate::providers::models::SubtitleOption>,
+    options: Vec<CachedSubtitleOption>,
+}
+
+/// One picker entry: an engine (MovieBox) caption or a public provider file.
+#[derive(Debug, Clone)]
+struct CachedSubtitleOption {
+    name: String,
+    url: String,
+    /// `moviebox`, `opensubtitles`, `podnapisi` or `wyzie`.
+    source: String,
+    /// True for MovieBox captions, which are validated against the MovieBox CDN
+    /// instead of the public provider allowlist.
+    engine: bool,
+    format: String,
+    downloads: Option<u64>,
+    hearing_impaired: bool,
+    language: String,
+}
+
+impl CachedSubtitleOption {
+    fn from_engine(option: crate::providers::models::SubtitleOption) -> Self {
+        let language = crate::subtitles::detect_language_code(&option.name);
+        Self {
+            name: option.name,
+            url: option.url,
+            source: "moviebox".to_string(),
+            engine: true,
+            format: "srt".to_string(),
+            downloads: None,
+            hearing_impaired: false,
+            language,
+        }
+    }
+
+    fn from_public(option: crate::subtitles::PublicSubtitle) -> Self {
+        Self {
+            name: option.name,
+            url: option.url,
+            source: option.source,
+            engine: false,
+            format: option.format,
+            downloads: option.downloads,
+            hearing_impaired: option.hearing_impaired,
+            language: option.language,
+        }
+    }
+
+    /// Rank used when merging: familiar languages first, then popularity.
+    fn sort_key(&self) -> (u8, std::cmp::Reverse<u64>, u8, String) {
+        (
+            crate::subtitles::language_priority(&self.language),
+            std::cmp::Reverse(self.downloads.unwrap_or(0)),
+            subtitle_source_priority(&self.source),
+            self.name.to_ascii_lowercase(),
+        )
+    }
+}
+
+fn subtitle_source_priority(source: &str) -> u8 {
+    match source {
+        "moviebox" => 0,
+        "opensubtitles" => 1,
+        "wyzie" => 2,
+        "podnapisi" => 3,
+        _ => 4,
+    }
 }
 
 struct WebPlayback {
@@ -1679,32 +1744,65 @@ async fn search_subtitles(query: &str, state: &WebState) -> HttpResponse {
         return HttpResponse::error(400, "Season and episode must both be provided");
     }
 
-    let result = tokio::time::timeout(
-        Duration::from_secs(45),
-        state.service.search_captions_by_title(
-            title,
-            (!year.is_empty()).then_some(year),
-            season,
-            episode,
-        ),
-    )
-    .await;
-    let options = match result {
-        Ok(Ok(options)) => options,
-        Ok(Err(error)) => {
-            log::warn!("subtitle search failed for requested title: {error}");
-            return HttpResponse::error(502, "Online subtitle search is temporarily unavailable");
+    // Engine captions (MovieBox) and the public providers are searched at the
+    // same time; either side failing still returns the other's results.
+    let engine_search = async {
+        match tokio::time::timeout(
+            Duration::from_secs(45),
+            state.service.search_captions_by_title(
+                title,
+                (!year.is_empty()).then_some(year),
+                season,
+                episode,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(options)) => options,
+            Ok(Err(error)) => {
+                log::warn!("engine subtitle search failed: {error}");
+                Vec::new()
+            }
+            Err(_) => {
+                log::warn!("engine subtitle search timed out for the requested title");
+                Vec::new()
+            }
         }
-        Err(_) => return HttpResponse::error(504, "Online subtitle search timed out"),
     };
+    let public_search = async {
+        tokio::time::timeout(
+            crate::subtitles::SEARCH_BUDGET,
+            crate::subtitles::search(
+                &state.media_client,
+                &crate::subtitles::SubtitleQuery {
+                    title: title.to_string(),
+                    year: (!year.is_empty()).then(|| year.to_string()),
+                    season,
+                    episode,
+                },
+            ),
+        )
+        .await
+        .unwrap_or_default()
+    };
+    let (engine_options, public_options) = tokio::join!(engine_search, public_search);
 
-    // Only retain MovieBox caption CDN URLs. URLs stay server-side and each
-    // redirect is checked again before a subtitle file is fetched.
-    let options = options
+    let mut options: Vec<CachedSubtitleOption> = engine_options
         .into_iter()
+        // Only retain MovieBox caption CDN URLs. URLs stay server-side and each
+        // redirect is checked again before a subtitle file is fetched.
         .filter(|option| validate_moviebox_caption_url(&option.url).is_ok())
-        .take(32)
-        .collect::<Vec<_>>();
+        .map(CachedSubtitleOption::from_engine)
+        .collect();
+    options.extend(
+        public_options
+            .into_iter()
+            .filter(|option| validate_public_subtitle_url(&option.url).is_ok())
+            .map(CachedSubtitleOption::from_public),
+    );
+    options.sort_by_key(CachedSubtitleOption::sort_key);
+    options.truncate(crate::subtitles::MAX_SUBTITLES);
+
     let mut subtitle_set_id = None;
     if !options.is_empty() {
         let token = opaque_token();
@@ -1729,14 +1827,30 @@ async fn search_subtitles(query: &str, state: &WebState) -> HttpResponse {
         subtitle_set_id = Some(token);
     }
 
+    let sources = options
+        .iter()
+        .map(|option| option.source.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
     HttpResponse::json(
         200,
         json!({
             "subtitle_set_id": subtitle_set_id,
+            "sources": sources,
             "subtitles": options
                 .iter()
                 .enumerate()
-                .map(|(index, option)| json!({ "index": index, "name": option.name }))
+                .map(|(index, option)| json!({
+                    "index": index,
+                    "name": option.name,
+                    "language": option.language,
+                    "source": option.source,
+                    "format": option.format,
+                    "downloads": option.downloads,
+                    "hearing_impaired": option.hearing_impaired,
+                }))
                 .collect::<Vec<_>>(),
         }),
     )
@@ -1775,11 +1889,77 @@ async fn subtitle_file(query: &str, state: &WebState) -> HttpResponse {
         }
     };
 
-    let text = match fetch_moviebox_caption(&state.subtitle_client, &option.url).await {
-        Ok(text) => text,
-        Err(message) => return HttpResponse::error(502, message),
+    let fetched = if option.engine {
+        fetch_moviebox_caption(&state.subtitle_client, &option.url).await
+    } else {
+        fetch_public_subtitle(&state.subtitle_client, &option.url).await
     };
-    HttpResponse::json(200, json!({ "text": text }))
+    match fetched {
+        Ok(text) => HttpResponse::json(
+            200,
+            json!({
+                "text": text,
+                "name": option.name,
+                "source": option.source,
+                "language": option.language,
+            }),
+        ),
+        Err(message) => HttpResponse::error(502, message),
+    }
+}
+
+/// Downloads one public provider subtitle, re-validating every redirect hop
+/// against the provider allowlist and unpacking zip/gzip payloads so the
+/// browser only ever receives text it can convert to WebVTT.
+async fn fetch_public_subtitle(client: &reqwest::Client, raw_url: &str) -> Result<String, String> {
+    let mut url = validate_public_subtitle_url(raw_url)?;
+    for redirect_count in 0..=MAX_SUBTITLE_REDIRECTS {
+        let response = client
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|_| "Could not download this subtitle file".to_string())?;
+        if response.status().is_redirection() {
+            if redirect_count == MAX_SUBTITLE_REDIRECTS {
+                return Err("Subtitle source redirected too many times".to_string());
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| "Subtitle source returned an invalid redirect".to_string())?;
+            url = validate_public_subtitle_url(
+                url.join(location)
+                    .map_err(|_| "Subtitle source returned an invalid redirect".to_string())?
+                    .as_str(),
+            )?;
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(format!(
+                "Subtitle source returned HTTP {}",
+                response.status().as_u16()
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_SUBTITLE_BYTES as u64)
+        {
+            return Err("Subtitle file is too large".to_string());
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| "Could not read this subtitle file".to_string())?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_SUBTITLE_BYTES {
+                return Err("Subtitle file is too large".to_string());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return crate::subtitles::decode_subtitle_file(&bytes);
+    }
+    Err("Subtitle source redirected too many times".to_string())
 }
 
 async fn fetch_moviebox_caption(client: &reqwest::Client, raw_url: &str) -> Result<String, String> {
@@ -1831,6 +2011,23 @@ async fn fetch_moviebox_caption(client: &reqwest::Client, raw_url: &str) -> Resu
         return Ok(String::from_utf8_lossy(&bytes).into_owned());
     }
     Err("Subtitle source redirected too many times".to_string())
+}
+
+/// Public subtitle URLs (OpenSubtitles, Podnapisi, Wyzie, …) are fetched
+/// server-side, so they must be https on an allowlisted provider host.
+fn validate_public_subtitle_url(raw_url: &str) -> Result<Url, String> {
+    let url =
+        Url::parse(raw_url).map_err(|_| "Subtitle source returned an invalid URL".to_string())?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return Err("Subtitle source returned an unsafe URL".to_string());
+    }
+    let Some(host) = url.host_str() else {
+        return Err("Subtitle source returned an invalid URL".to_string());
+    };
+    if !crate::subtitles::is_allowed_subtitle_host(host) {
+        return Err("Subtitle source is not a trusted provider".to_string());
+    }
+    Ok(url)
 }
 
 fn validate_moviebox_caption_url(raw_url: &str) -> Result<Url, String> {
@@ -2974,6 +3171,76 @@ mod tests {
         assert_eq!(body["players"][0]["id"], json!("vlc"));
         assert_eq!(body["players"][0]["label"], json!("VLC"));
         assert_eq!(body["reason"], json!(null));
+    }
+
+    #[test]
+    fn public_subtitle_urls_are_limited_to_provider_hosts() {
+        assert!(validate_public_subtitle_url("https://dl.opensubtitles.org/x/a.srt").is_ok());
+        assert!(
+            validate_public_subtitle_url("https://opensubtitles-v3.strem.io/subtitles/movie/x.srt")
+                .is_ok()
+        );
+        assert!(
+            validate_public_subtitle_url("https://www.podnapisi.net/subtitles/1/download").is_ok()
+        );
+        assert!(validate_public_subtitle_url("http://dl.opensubtitles.org/a.srt").is_err());
+        assert!(validate_public_subtitle_url("https://127.0.0.1/a.srt").is_err());
+        assert!(validate_public_subtitle_url("https://evil.test/a.srt").is_err());
+        assert!(
+            validate_public_subtitle_url("https://dl.opensubtitles.org.evil.test/a.srt").is_err()
+        );
+        assert!(validate_public_subtitle_url("https://user@dl.opensubtitles.org/a.srt").is_err());
+        assert!(validate_public_subtitle_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn merged_subtitles_rank_engine_captions_first_for_english() {
+        let engine = vec![crate::providers::models::SubtitleOption {
+            name: "English".to_string(),
+            url: "https://pacdn.aoneroom.com/other/captions/en.srt".to_string(),
+        }];
+        let public = vec![
+            crate::subtitles::PublicSubtitle {
+                name: "Hindi · OpenSubtitles · 1080p".to_string(),
+                url: "https://dl.opensubtitles.org/hi.srt".to_string(),
+                language: "hi".to_string(),
+                source: "opensubtitles".to_string(),
+                format: "srt".to_string(),
+                downloads: Some(500),
+                hearing_impaired: false,
+            },
+            crate::subtitles::PublicSubtitle {
+                name: "English · Podnapisi · WEB-DL".to_string(),
+                url: "https://www.podnapisi.net/subtitles/1/download".to_string(),
+                language: "en".to_string(),
+                source: "podnapisi".to_string(),
+                format: "zip".to_string(),
+                downloads: Some(90),
+                hearing_impaired: false,
+            },
+        ];
+        let mut options: Vec<CachedSubtitleOption> = engine
+            .into_iter()
+            .map(CachedSubtitleOption::from_engine)
+            .collect();
+        options.extend(public.into_iter().map(CachedSubtitleOption::from_public));
+        options.sort_by_key(CachedSubtitleOption::sort_key);
+
+        let names: Vec<&str> = options.iter().map(|option| option.name.as_str()).collect();
+        // English engine caption first, then English public, then Hindi.
+        assert_eq!(
+            names,
+            vec![
+                "English",
+                "English · Podnapisi · WEB-DL",
+                "Hindi · OpenSubtitles · 1080p"
+            ]
+        );
+        assert_eq!(options[0].language, "en");
+        assert!(options[0].engine);
+        assert!(!options[1].engine);
+        assert_eq!(options[1].format, "zip");
+        assert_eq!(options[2].language, "hi");
     }
 
     #[test]

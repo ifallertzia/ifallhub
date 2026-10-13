@@ -11,6 +11,7 @@ pub mod player;
 pub mod providers;
 pub mod proxy;
 pub mod service;
+pub mod subtitles;
 pub mod tui;
 pub mod updater;
 pub mod web_api;

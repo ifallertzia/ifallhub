@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { subtitleLanguageTag, subtitleToVtt } from '../src/player/subtitles.js';
+import {
+  pickAutomaticSubtitle,
+  subtitleLanguageTag,
+  subtitleToVtt,
+} from '../src/player/subtitles.js';
 
 test('subtitleToVtt converts UTF-8 SRT timestamps and preserves cue text', () => {
   const source = '\uFEFF1\r\n00:00:01,050 --> 00:00:03,200\r\nHello, world!\r\n';
@@ -38,6 +42,39 @@ test('subtitleToVtt rejects empty and unsupported files', () => {
 test('subtitleLanguageTag maps common language names and codes', () => {
   assert.equal(subtitleLanguageTag('English'), 'en');
   assert.equal(subtitleLanguageTag('Hindi'), 'hi');
-  assert.equal(subtitleLanguageTag('eng'), 'eng');
+  // Three letter codes fold onto their ISO 639-1 tag, which browsers accept.
+  assert.equal(subtitleLanguageTag('eng'), 'en');
   assert.equal(subtitleLanguageTag('Unknown caption'), 'und');
+});
+
+test('subtitle language tags are detected inside provider labels', () => {
+  assert.equal(subtitleLanguageTag('English · OpenSubtitles · 1080p WEB-DL'), 'en');
+  assert.equal(subtitleLanguageTag('English [SDH] · Podnapisi · WEB'), 'en');
+  assert.equal(subtitleLanguageTag('Hindi · Wyzie · 1080p'), 'hi');
+  assert.equal(subtitleLanguageTag('hindi'), 'hi');
+  assert.equal(subtitleLanguageTag('eng'), 'en');
+  assert.equal(subtitleLanguageTag('English'), 'en');
+  // Two letter words that are also language codes must not win.
+  assert.equal(subtitleLanguageTag('Movie 2024 IT release'), 'und');
+  assert.equal(subtitleLanguageTag('The Best Of It'), 'und');
+  assert.equal(subtitleLanguageTag(''), 'und');
+});
+
+test('automatic subtitles prefer english, then the first result', () => {
+  const options = [
+    { index: 0, name: 'Hindi · Wyzie · 1080p', language: 'hi' },
+    { index: 1, name: 'French · Podnapisi', language: 'fr' },
+    { index: 2, name: 'English · OpenSubtitles · 1080p', language: 'en' },
+  ];
+  assert.equal(pickAutomaticSubtitle(options).index, 2);
+  assert.equal(pickAutomaticSubtitle(options, ['hi']).index, 0);
+  // Language carried only inside the label still counts.
+  assert.equal(
+    pickAutomaticSubtitle([{ index: 4, name: 'English [SDH] · Podnapisi · WEB' }]).index,
+    4,
+  );
+  // No English available: keep the first provider result.
+  assert.equal(pickAutomaticSubtitle([{ index: 7, name: 'Tamil · Wyzie' }]).index, 7);
+  assert.equal(pickAutomaticSubtitle([]), null);
+  assert.equal(pickAutomaticSubtitle(null), null);
 });
