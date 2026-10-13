@@ -68,15 +68,82 @@ export function subtitleToVtt(rawText) {
   return `WEBVTT\n\n${text.replace(SRT_TIMESTAMP, (_, time, milliseconds) => `${time}.${milliseconds.padEnd(3, '0')}`)}`;
 }
 
+const LANGUAGE_TAGS = {
+  ar: 'ar', ara: 'ar', arabic: 'ar',
+  bn: 'bn', ben: 'bn', bengali: 'bn',
+  cs: 'cs', cze: 'cs', ces: 'cs', czech: 'cs',
+  da: 'da', dan: 'da', danish: 'da',
+  de: 'de', ger: 'de', deu: 'de', german: 'de',
+  el: 'el', gre: 'el', ell: 'el', greek: 'el',
+  en: 'en', eng: 'en', english: 'en',
+  es: 'es', spa: 'es', spanish: 'es',
+  fa: 'fa', per: 'fa', fas: 'fa', persian: 'fa',
+  fi: 'fi', fin: 'fi', finnish: 'fi',
+  fr: 'fr', fre: 'fr', fra: 'fr', french: 'fr',
+  he: 'he', heb: 'he', hebrew: 'he',
+  hi: 'hi', hin: 'hi', hindi: 'hi',
+  hu: 'hu', hun: 'hu', hungarian: 'hu',
+  id: 'id', ind: 'id', indonesian: 'id',
+  it: 'it', ita: 'it', italian: 'it',
+  ja: 'ja', jpn: 'ja', japanese: 'ja',
+  ko: 'ko', kor: 'ko', korean: 'ko',
+  ml: 'ml', mal: 'ml', malayalam: 'ml',
+  ms: 'ms', may: 'ms', msa: 'ms', malay: 'ms',
+  nl: 'nl', dut: 'nl', nld: 'nl', dutch: 'nl',
+  no: 'no', nor: 'no', norwegian: 'no',
+  pl: 'pl', pol: 'pl', polish: 'pl',
+  pt: 'pt', por: 'pt', portuguese: 'pt',
+  ru: 'ru', rus: 'ru', russian: 'ru',
+  ta: 'ta', tam: 'ta', tamil: 'ta',
+  te: 'te', tel: 'te', telugu: 'te',
+  th: 'th', tha: 'th', thai: 'th',
+  tr: 'tr', tur: 'tr', turkish: 'tr',
+  ur: 'ur', urd: 'ur', urdu: 'ur',
+  vi: 'vi', vie: 'vi', vietnamese: 'vi',
+  zh: 'zh', chi: 'zh', zho: 'zh', chinese: 'zh',
+};
+
+// Two letter words that also happen to be ISO 639-1 codes (it, is, no, as…).
+// Scanning labels like "English · OpenSubtitles · 1080p" must not match these.
+const LANGUAGE_FALSE_POSITIVES = new Set([
+  'in', 'is', 'it', 'as', 'no', 'on', 'to', 'of', 'at', 'be', 'do', 'if',
+  'or', 'so', 'we', 'an', 'by', 'my', 'up', 'us', 'me', 'ok', 'tv', 'hd',
+]);
+
+/** ISO 639-1 tag for a picker label, e.g. `English · OpenSubtitles · 1080p` → `en`. */
 export function subtitleLanguageTag(label) {
   const value = String(label || '').trim().toLowerCase();
-  const known = {
-    arabic: 'ar', bengali: 'bn', chinese: 'zh', dutch: 'nl', english: 'en', french: 'fr',
-    german: 'de', hindi: 'hi', indonesian: 'id', italian: 'it', japanese: 'ja', korean: 'ko',
-    malay: 'ms', persian: 'fa', polish: 'pl', portuguese: 'pt', russian: 'ru', spanish: 'es',
-    tamil: 'ta', telugu: 'te', thai: 'th', turkish: 'tr', urdu: 'ur', vietnamese: 'vi',
-  };
-  if (known[value]) return known[value];
-  const code = value.match(/^[a-z]{2,3}(?:-[a-z]{2,4})?$/i);
-  return code ? code[0].toLowerCase() : 'und';
+  if (!value) return 'und';
+  if (LANGUAGE_TAGS[value]) return LANGUAGE_TAGS[value];
+  const exact = value.match(/^[a-z]{2,3}(?:-[a-z]{2,4})?$/);
+  if (exact) return exact[0].split('-')[0];
+  for (const token of value.split(/[^a-z]+/)) {
+    if (!token || LANGUAGE_FALSE_POSITIVES.has(token)) continue;
+    if (LANGUAGE_TAGS[token]) return LANGUAGE_TAGS[token];
+  }
+  return 'und';
+}
+
+/** Language tag an engine/provider option reports, falling back to its label. */
+function optionLanguageTag(option) {
+  const reported = String(option?.language || '').trim().toLowerCase();
+  if (reported && reported !== 'und') return reported;
+  return subtitleLanguageTag(option?.name);
+}
+
+/**
+ * The caption to turn on automatically: the first option in `preferred` order
+ * (English by default), otherwise the first option the providers returned.
+ */
+export function pickAutomaticSubtitle(options, preferred = ['en', 'eng', 'english', 'hi']) {
+  const list = (Array.isArray(options) ? options : []).filter(Boolean);
+  if (!list.length) return null;
+  for (const want of preferred) {
+    const match = list.find((option) => {
+      const tag = optionLanguageTag(option);
+      return tag === want || tag.startsWith(`${want}-`) || tag.startsWith(`${want}_`);
+    });
+    if (match) return match;
+  }
+  return list[0];
 }

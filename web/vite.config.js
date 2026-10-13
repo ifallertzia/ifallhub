@@ -385,12 +385,58 @@ function makeMockApiPlugin(enabled) {
           return json(res, 200, { meta });
         }
 
+        // Public subtitle providers (OpenSubtitles v3, Podnapisi, Wyzie) answer
+        // with the same shape as the Rust engine so the picker can be tried
+        // without a backend.
         if (path === '/api/subtitles') {
-          return json(res, 200, { subtitle_set_id: null, subtitles: [] });
+          const season = Number(query.get('season') || 0);
+          const episode = Number(query.get('episode') || 0);
+          const scope = season && episode ? ` S${season}E${episode}` : '';
+          return json(res, 200, {
+            subtitle_set_id: 'demo0000subtitleset0000provider',
+            sources: ['opensubtitles', 'podnapisi', 'wyzie'],
+            subtitles: [
+              {
+                index: 0,
+                name: `English · OpenSubtitles · 1080p WEB-DL${scope}`,
+                language: 'en',
+                source: 'opensubtitles',
+                format: 'srt',
+                downloads: 4210,
+                hearing_impaired: false,
+              },
+              {
+                index: 1,
+                name: `English [SDH] · Podnapisi · WEB${scope}`,
+                language: 'en',
+                source: 'podnapisi',
+                format: 'srt',
+                downloads: 820,
+                hearing_impaired: true,
+              },
+              {
+                index: 2,
+                name: `Hindi · Wyzie · 1080p${scope}`,
+                language: 'hi',
+                source: 'wyzie',
+                format: 'srt',
+                downloads: 260,
+                hearing_impaired: false,
+              },
+            ],
+          });
         }
 
         if (path === '/api/subtitle-file') {
-          return json(res, 404, { error: 'Demo mode has no external subtitle files' });
+          const index = Number(query.get('index') || 0);
+          const hindi = '1\n00:00:01,000 --> 00:00:04,000\nडेमो सबटाइटल (public API se)\n\n2\n00:00:05,000 --> 00:00:08,000\nRust engine ke saath asli captions aate hain\n';
+          const english = '1\n00:00:01,000 --> 00:00:04,000\nDemo subtitles from a public provider API\n\n2\n00:00:05,000 --> 00:00:08,000\nRun the Rust engine for real captions\n';
+          return json(res, 200, {
+            text: index === 2 ? hindi : english,
+            name: index === 2 ? 'Hindi · Wyzie · 1080p' : 'English · OpenSubtitles · 1080p WEB-DL',
+            source: index === 2 ? 'wyzie' : 'opensubtitles',
+            language: index === 2 ? 'hi' : 'en',
+          });
         }
 
         if (path === '/api/streams') {
@@ -434,6 +480,28 @@ function makeMockApiPlugin(enabled) {
             source_label: 'Demo sample',
             quality: '1080p',
             mode: 'demo',
+          });
+        }
+
+        // --- Local player handoff ("Open in VLC") ---------------------------
+        // The demo runs without the Rust engine, so it has no local player to
+        // launch: the button copies the link instead. Start
+        // `cargo run -- --web-api` to open VLC for real.
+        if (path === '/api/player' && req.method !== 'POST') {
+          return json(res, 200, {
+            available: false,
+            players: [],
+            default: null,
+            reason: 'Demo mode has no local player. Run the Rust engine to open VLC.',
+          });
+        }
+
+        if (path === '/api/player/open' && req.method === 'POST') {
+          await readBody();
+          return json(res, 409, {
+            error: 'Demo mode has no local player. Run the Rust engine to open VLC.',
+            available: false,
+            players: [],
           });
         }
 

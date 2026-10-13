@@ -4,7 +4,13 @@
 import * as api from '../lib/api.js';
 import * as library from '../lib/library.js';
 import { appendPlaybackLink } from '../ui/playback-links.js';
-import { setCurrentPlayback, clearCurrentPlayback, createVlcButton, hasPlaybackUrl, copyPlaybackUrl } from '../ui/vlc-button.js';
+import {
+  setCurrentPlayback,
+  clearCurrentPlayback,
+  createVlcButton,
+  describeOpenResult,
+  showVlcToast,
+} from '../ui/vlc-button.js';
 import { cardHtml, rowHtml, spinnerHtml } from '../ui/components.js';
 import {
   SERVER_ROTATION,
@@ -15,7 +21,7 @@ import {
   providerLabel,
 } from '../lib/format.js';
 import { rankRelated, similarByMeta } from '../lib/recommend.js';
-import { subtitleLanguageTag, subtitleToVtt } from '../player/subtitles.js';
+import { pickAutomaticSubtitle, subtitleLanguageTag, subtitleToVtt } from '../player/subtitles.js';
 import { mountPlayerOverlay } from '../player/overlay.js';
 import { app, cardMeta, ensureMeta, rememberGenres } from '../state.js';
 import { navigate, titlePath, watchPath } from '../lib/router.js';
@@ -34,6 +40,28 @@ import { isLibde265Available } from '../player/libde265-player.js';
 
 const CODEC_HINT =
   'Ye link H.265/HEVC ya .mkv me hai — browser ise play nahi kar sakta (mpv/VLC me chalega). Neeche koi doosra release chuno ya TUI use karo.';
+
+// Automatic captions: on by default, remembered per browser.
+const AUTO_SUBTITLES_KEY = 'ifallhub_auto_subtitles_v1';
+
+function autoSubtitlesPreferred() {
+  try {
+    const stored = window.localStorage?.getItem(AUTO_SUBTITLES_KEY);
+    if (stored === 'off') return false;
+    if (stored === 'on') return true;
+  } catch {
+    /* Private mode or blocked storage: keep the default. */
+  }
+  return true;
+}
+
+function persistAutoSubtitles(value) {
+  try {
+    window.localStorage?.setItem(AUTO_SUBTITLES_KEY, value ? 'on' : 'off');
+  } catch {
+    /* Nothing to do: the preference simply will not be remembered. */
+  }
+}
 
 const state = {
   provider: 'moviebox',
@@ -59,6 +87,8 @@ const state = {
   resumeAt: 0,
   progressTimer: 0,
   autoplayNext: true,
+  autoSubtitles: true,
+  autoSubtitleTried: false,
   subtitleSearchController: null,
   subtitleSetId: '',
   subtitleOptions: [],
@@ -87,6 +117,8 @@ export async function renderWatch(container, route) {
   state.entry = null;
   state.selected = 0;
   state.resumeAt = 0;
+  state.autoSubtitles = autoSubtitlesPreferred();
+  state.autoSubtitleTried = false;
   state.subtitleSearchController?.abort();
   state.subtitleSearchController = null;
   state.subtitleSetId = '';
@@ -155,6 +187,7 @@ export async function renderWatch(container, route) {
     getSelectedRelease: () => state.selected,
     getSubtitleOptions: () => state.subtitleOptions,
     getSelectedSubtitle: () => state.selectedSubtitleIndex,
+    getAutoSubtitles: () => state.autoSubtitles,
     getChapters: () => state.details?.chapters || [],
     getCanPrevious: () => Boolean(previousEpisode()),
     getCanNext: () => Boolean(nextEpisode()),
@@ -169,6 +202,7 @@ export async function renderWatch(container, route) {
     },
     onSearchSubtitles: (button) => searchSubtitles(button),
     onSelectSubtitle: (value) => chooseSubtitle(value),
+    onToggleAutoSubtitles: (value) => setAutoSubtitles(value),
     onSelectRelease: (index) => playManual(index),
     onStatus: (message) => setStatus(message, false),
   });
@@ -177,8 +211,9 @@ export async function renderWatch(container, route) {
 }
 
 /**
- * Add VLC button to the player UI
- * This button allows users to copy the playback URL for use in external players like VLC/MPV
+ * Add the "Open in VLC" button to the player UI. Clicking it asks the engine to
+ * start a local player on the stream the page is playing; when this deployment
+ * has no local player the engine copies the playback link instead.
  */
 function addVlcButtonToPlayer(container) {
   // Remove any existing VLC button
@@ -189,33 +224,17 @@ function addVlcButtonToPlayer(container) {
   
   // Create VLC button
   const vlcButton = createVlcButton({
-    text: 'Open in VLC',
     className: 'ghost-button',
-    onClick: async () => {
-      if (!hasPlaybackUrl()) {
-        showVlcToast('No playback URL available. Start a stream first.', 'error');
-        return;
-      }
-      
-      const copied = await copyPlaybackUrl();
-      
-      if (copied) {
-        showVlcToast('URL copied! Open VLC → Media → Open Network Stream → Paste → Play', 'success');
-        
-        // Update button text temporarily
-        const span = vlcButton.querySelector('span');
-        if (span) {
-          const originalText = span.textContent;
-          span.textContent = 'Copied!';
-          
-          setTimeout(() => {
-            span.textContent = originalText;
-          }, 2000);
-        }
-      } else {
-        showVlcToast('Could not copy automatically. Check console for URL.', 'error');
-      }
-    }
+    target: () => ({
+      streamSetId: state.entry?.streamSetId || '',
+      releaseIndex: state.entry?.releases?.[state.selected]?.serverIndex ?? 0,
+      mirrorIndex: 0,
+      resumeSeconds: Math.max(0, Math.round(state.resumeAt || 0)),
+    }),
+    onResult: (result) => {
+      const summary = describeOpenResult(result);
+      showVlcToast(summary.message, summary.kind);
+    },
   });
   
   // Find the player controls area to add the button
@@ -234,112 +253,6 @@ function addVlcButtonToPlayer(container) {
   }
 }
 
-/**
- * Show VLC toast notification
- */
-function showVlcToast(message, type = 'info') {
-  const toast = document.getElementById('vlc-toast') || createVlcToastContainer();
-  
-  if (toast._timeout) {
-    clearTimeout(toast._timeout);
-  }
-  
-  toast.textContent = message;
-  toast.className = `vlc-toast vlc-toast-${type}`;
-  toast.hidden = false;
-  
-  toast._timeout = setTimeout(() => {
-    toast.hidden = true;
-    toast._timeout = null;
-  }, 5000);
-}
-
-/**
- * Create VLC toast container
- */
-function createVlcToastContainer() {
-  const toast = document.createElement('div');
-  toast.id = 'vlc-toast';
-  toast.className = 'vlc-toast';
-  toast.hidden = true;
-  toast.role = 'status';
-  toast.ariaLive = 'polite';
-  
-  document.body.appendChild(toast);
-  
-  if (!document.getElementById('vlc-toast-css')) {
-    const style = document.createElement('style');
-    style.id = 'vlc-toast-css';
-    style.textContent = `
-      .vlc-toast {
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        padding: 12px 16px;
-        border-radius: 8px;
-        background: #1a1a1a;
-        color: #fff;
-        font-size: 13px;
-        font-family: inherit;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-        z-index: 9999;
-        max-width: 400px;
-        transition: opacity 0.2s, transform 0.2s;
-      }
-      .vlc-toast.hidden {
-        opacity: 0;
-        transform: translateY(10px);
-        pointer-events: none;
-      }
-      .vlc-toast-success {
-        border-left: 3px solid #22c55e;
-      }
-      .vlc-toast-error {
-        border-left: 3px solid #ef4444;
-        background: #2a0a0a;
-      }
-      .vlc-toast-info {
-        border-left: 3px solid #3b82f6;
-      }
-      .vlc-button-container {
-        position: absolute;
-        bottom: 12px;
-        right: 12px;
-        z-index: 10;
-      }
-      .vlc-button {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 8px 12px;
-        background: rgba(0,0,0,0.7);
-        color: #fff;
-        border: 1px solid #444;
-        border-radius: 6px;
-        font-size: 13px;
-        font-family: inherit;
-        cursor: pointer;
-        transition: all 0.2s;
-        backdrop-filter: blur(4px);
-      }
-      .vlc-button:hover {
-        background: rgba(0,0,0,0.9);
-        border-color: #666;
-      }
-      .vlc-button:active {
-        background: rgba(0,0,0,1);
-      }
-      .vlc-button svg {
-        width: 16px;
-        height: 16px;
-        fill: currentColor;
-      }
-    `;
-    document.head.appendChild(style);
-  }
-  
-  return toast;
-}
 
 function bind(container) {
   container.querySelector('[data-retry-server]')?.addEventListener('click', () => {
@@ -372,6 +285,9 @@ function bind(container) {
       video.currentTime = state.resumeAt;
       state.resumeAt = 0;
     }
+    // Subtitles load by themselves: search the engine + public providers on the
+    // first playback and turn the best match (English first) on.
+    void autoLoadSubtitles();
   });
 }
 
@@ -384,10 +300,10 @@ function subtitleOption(index) {
   return state.subtitleOptions.find((option) => Number(option.index) === Number(index));
 }
 
-async function searchSubtitles(button) {
+async function searchSubtitles(button, { automatic = false } = {}) {
   const title = state.details?.title || state.title;
   if (!title || title === 'Now playing') {
-    setSubtitleStatus('This title could not be identified for subtitle search.');
+    if (!automatic) setSubtitleStatus('This title could not be identified for subtitle search.');
     return;
   }
 
@@ -400,9 +316,11 @@ async function searchSubtitles(button) {
   }
   const controller = new AbortController();
   state.subtitleSearchController = controller;
-  const originalLabel = button.textContent;
-  button.disabled = true;
-  button.textContent = 'Searching…';
+  const originalLabel = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Searching…';
+  }
   setSubtitleStatus(`Searching online captions for ${title}…`);
 
   try {
@@ -420,6 +338,10 @@ async function searchSubtitles(button) {
     state.subtitleOptions = (payload.subtitles || []).map((option, order) => ({
       index: Number.isInteger(Number(option.index)) ? Number(option.index) : order,
       name: String(option.name || 'Unknown'),
+      language: String(option.language || '').toLowerCase(),
+      source: String(option.source || ''),
+      format: String(option.format || ''),
+      downloads: Number(option.downloads) || 0,
     }));
     state.selectedSubtitleIndex = null;
     state.subtitleText = '';
@@ -436,6 +358,13 @@ async function searchSubtitles(button) {
 
     if (!state.subtitleSetId || state.subtitleOptions.length === 0) {
       setSubtitleStatus('No online subtitles were found for this title or episode. Playback will continue without captions.');
+    } else if (state.autoSubtitles) {
+      const best = pickAutomaticSubtitle(state.subtitleOptions);
+      if (best) {
+        setSubtitleStatus(`${state.subtitleOptions.length} subtitles found — turning on ${best.name}.`);
+        await chooseSubtitle(String(best.index));
+        return;
+      }
     } else {
       setSubtitleStatus(`${state.subtitleOptions.length} subtitle language${state.subtitleOptions.length === 1 ? '' : 's'} found. Choose one to turn captions on.`);
     }
@@ -446,10 +375,43 @@ async function searchSubtitles(button) {
   } finally {
     if (state.subtitleSearchController === controller) {
       state.subtitleSearchController = null;
-      button.disabled = false;
-      button.textContent = originalLabel || 'CC Find subtitles';
+      if (button) {
+        button.disabled = false;
+        button.textContent = originalLabel || 'CC Find subtitles';
+      }
     }
   }
+}
+
+/** Turns automatic captions on/off (the checkbox lives in the subtitle panel). */
+function setAutoSubtitles(value) {
+  state.autoSubtitles = Boolean(value);
+  persistAutoSubtitles(state.autoSubtitles);
+  if (!state.autoSubtitles) {
+    setSubtitleStatus('Automatic subtitles off. Pick a language to turn captions on.');
+    return;
+  }
+  state.autoSubtitleTried = true;
+  setSubtitleStatus('Automatic subtitles on — loading the best match…');
+  void autoLoadSubtitles();
+}
+
+/**
+ * Makes captions show up without opening the subtitle panel: searches the
+ * engine + public providers on the first playback and turns the best language
+ * (English first) on.
+ */
+async function autoLoadSubtitles() {
+  if (!state.autoSubtitles || state.selectedSubtitleIndex !== null) return;
+  if (!state.subtitleOptions.length) {
+    // One search per watch session; the panel's button still searches again.
+    if (state.autoSubtitleTried) return;
+    state.autoSubtitleTried = true;
+    await searchSubtitles(null, { automatic: true });
+    return;
+  }
+  const best = pickAutomaticSubtitle(state.subtitleOptions);
+  if (best) await chooseSubtitle(String(best.index));
 }
 
 async function chooseSubtitle(value) {
@@ -469,6 +431,8 @@ async function chooseSubtitle(value) {
   state.selectedSubtitleIndex = index;
   state.subtitleText = '';
   clearActiveSubtitle();
+  const selector = document.querySelector('#subtitle-language');
+  if (selector) selector.value = String(index);
   setSubtitleStatus(`Loading ${option.name} subtitles…`);
 
   try {

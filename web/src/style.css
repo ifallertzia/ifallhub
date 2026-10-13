@@ -386,6 +386,26 @@ h1, h2, h3, p { margin: 0; }
 .stream-check { color: var(--accent-light); }
 .stream-downloads { display: flex; flex-wrap: wrap; gap: 7px; }
 .stream-note { margin-top: 12px; color: var(--dim); font-size: 11px; }
+.stream-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+
+/* "Open in VLC": hands the stream to a local player (VLC, mpv, IINA). */
+.vlc-launch { border-color: rgba(255, 92, 70, 0.35); }
+.vlc-launch:hover { border-color: var(--accent); color: var(--accent-light); }
+.vlc-button-container { position: absolute; bottom: 12px; right: 12px; z-index: 10; }
+.vlc-button-container .vlc-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  border: 1px solid #444;
+  border-radius: 6px;
+  font-size: 13px;
+  backdrop-filter: blur(4px);
+}
+.vlc-button-container .vlc-button:hover { background: rgba(0, 0, 0, 0.9); border-color: #666; }
+.vlc-button-container .vlc-button .vlc-button-icon { font-size: 11px; color: var(--accent-light); }
 
 /* ----------------------------------------------------------------- watch */
 .watch { padding-top: 18px; }
@@ -599,6 +619,45 @@ h1, h2, h3, p { margin: 0; }
 .player-center-transport[hidden] { display: none; }
 .video-frame:fullscreen { width: 100vw; height: 100vh; aspect-ratio: auto; border: 0; border-radius: 0; background: var(--player-surface-1); }
 .video-frame:fullscreen .player-overlay { border-radius: 0; }
+
+/* CSS-only fullscreen (iOS Safari before 16.4, in-app browsers): the frame is
+   pinned over the viewport so the player fills the phone screen and the control
+   overlay stays usable. */
+.video-frame.is-fullscreen-fallback { position: fixed; inset: 0; z-index: 200; width: 100vw; height: 100vh; height: 100dvh; aspect-ratio: auto; border: 0; border-radius: 0; background: #000; }
+.video-frame.is-fullscreen-fallback .player-overlay { border-radius: 0; }
+body.player-fullscreen-open { overflow: hidden; }
+
+/* Phones: one horizontal bar with play/pause and fullscreen. Every other
+   control lives inside the full-screen player. */
+.player-overlay[data-compact="true"] .player-center-transport,
+.player-overlay[data-compact="true"] .player-region[data-region="landscape.top-right"],
+.player-overlay[data-compact="true"] .player-region[data-region="portrait.top-right"],
+.player-overlay[data-compact="true"] .player-region[data-region="landscape.bottom-left"],
+.player-overlay[data-compact="true"] .player-region[data-region="landscape.bottom-right"],
+.player-overlay[data-compact="true"] .player-region[data-region="portrait.bottom"] { display: none; }
+.player-overlay[data-compact="true"] .player-top-row { padding-bottom: 0; }
+.player-overlay[data-compact="true"] .player-title { max-width: 52vw; font-size: 13px; }
+.player-overlay[data-compact="true"] .player-bottom-column { right: 12px; bottom: calc(10px + env(safe-area-inset-bottom, 0px)); left: 12px; }
+.player-overlay[data-compact="true"] .player-time-label { margin-bottom: 0; font-size: 11px; }
+.player-overlay[data-compact="true"] .player-seek-hit-area { height: 34px; }
+.player-overlay[data-compact="true"] .player-bottom-row { margin-top: 4px; }
+.player-overlay[data-compact="true"] .player-bottom-transport { flex: 1 1 100%; }
+.player-overlay[data-compact="true"] .player-transport-row { width: 100%; gap: 10px; }
+.player-overlay[data-compact="true"] .player-transport-previous,
+.player-overlay[data-compact="true"] .player-transport-next,
+.player-overlay[data-compact="true"] .player-skip-button { display: none; }
+.player-overlay[data-compact="true"] .player-transport-toggle-play { width: 44px; height: 44px; flex-basis: 44px; margin-right: auto; }
+.player-overlay[data-compact="true"] .player-transport-toggle-play svg { width: 22px; height: 22px; }
+.player-overlay[data-compact="true"] .player-transport-fullscreen { width: 44px; height: 44px; flex-basis: 44px; margin-left: auto; }
+
+/* Inside fullscreen the complete control set is available: the bar expands and
+   the bottom rows scroll instead of wrapping off-screen. */
+.player-overlay[data-fullscreen="true"] .player-transport-fullscreen { display: inline-flex; }
+.player-overlay[data-fullscreen="true"][data-orientation="portrait"] .player-region[data-region="portrait.bottom"] { flex: 1 1 100%; flex-wrap: nowrap; justify-content: flex-start; gap: 8px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
+.player-overlay[data-fullscreen="true"][data-orientation="portrait"] .player-region[data-region="portrait.bottom"]::-webkit-scrollbar { display: none; }
+.player-overlay[data-fullscreen="true"] .player-bottom-row { flex-wrap: wrap; }
+.player-menu-toggle { display: inline-flex; align-items: center; gap: var(--player-space-8); color: var(--player-on-surface); font-size: 12px; cursor: pointer; }
+.player-menu-toggle input { width: 16px; height: 16px; accent-color: var(--player-primary); }
 
 .player-overlay[data-orientation="portrait"] .player-title { max-width: min(46vw, 280px); font-size: 14px; }
 .player-overlay[data-orientation="portrait"] .player-top-row { padding-top: calc(var(--player-space-8) + env(safe-area-inset-top, 0px)); }

@@ -16,6 +16,7 @@ const ICONS = {
   screenshot: '<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3"/>',
   chevron: '<path d="m9 18 6-6-6-6"/>',
   fullscreen: '<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/>',
+  'fullscreen-exit': '<path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/>',
   play: '<path d="m8 5 12 7-12 7V5Z" fill="currentColor" stroke="none"/>',
   pause: '<path d="M8 5h3v14H8zM15 5h3v14h-3z" fill="currentColor" stroke="none"/>',
   previous: '<path d="M6 5v14M19 6 9 12l10 6V6Z"/>',
@@ -68,6 +69,17 @@ const REGION_TITLES = {
   'portrait.top-left': 'Portrait top left', 'portrait.top-right': 'Portrait top right',
   'portrait.bottom': 'Portrait bottom row',
 };
+
+/**
+ * True when the player should show the compact bar — play/pause and fullscreen
+ * only — instead of every control chip. Phones always qualify, and small touch
+ * screens (a tablet in a phone-sized window) do too.
+ */
+export function usesCompactBar(width, coarsePointer = false) {
+  const size = Number(width) || 0;
+  if (size > 0 && size <= 820) return true;
+  return Boolean(coarsePointer) && size <= 1024;
+}
 
 export function formatPlayerTime(seconds) {
   const whole = Math.max(0, Math.floor(Number(seconds) || 0));
@@ -149,6 +161,7 @@ function buildPopoverMarkup() {
       <div class="player-popover-heading"><strong>Subtitles</strong><button class="player-close-button" type="button" data-action="close-popover" aria-label="Close subtitle options"></button></div>
       <button class="player-menu-button" type="button" data-find-subtitles aria-label="Search online subtitles">Find subtitles online</button>
       <label class="player-menu-field" for="subtitle-language"><span>Language</span><select id="subtitle-language" disabled aria-label="Subtitle language"><option value="">Subtitles off</option></select></label>
+      <label class="player-menu-toggle"><input type="checkbox" data-auto-subtitles aria-label="Load subtitles automatically" /><span>Load subtitles automatically</span></label>
       <p class="player-menu-status" id="subtitle-status" role="status" aria-live="polite">Search online captions by title.</p>
     </section>
     <section class="player-popover-panel" data-panel="audio" hidden aria-label="Audio track options">
@@ -244,6 +257,7 @@ export function mountPlayerOverlay({
   getSelectedRelease = () => 0,
   getSubtitleOptions = () => [],
   getSelectedSubtitle = () => null,
+  getAutoSubtitles = () => true,
   getChapters = () => [],
   getCanPrevious = () => false,
   getCanNext = () => false,
@@ -252,6 +266,7 @@ export function mountPlayerOverlay({
   onNext = () => {},
   onSearchSubtitles = () => {},
   onSelectSubtitle = () => {},
+  onToggleAutoSubtitles = () => {},
   onSelectRelease = () => {},
   onStatus = () => {},
 } = {}) {
@@ -307,6 +322,7 @@ export function mountPlayerOverlay({
     hideTimer: 0, tapTimer: 0, lastTapX: 0, suppressClickUntil: 0, pointer: null,
     boostTimer: 0, gestureTimer: 0, adjustmentTimer: 0, seekedTimeout: 0,
     waveFrame: 0, waveTime: 0, wavePhase: 0, brightness: 1, battery: null,
+    compact: false, pseudoFullscreen: false,
     batteryLevel: null, lastClockTick: 0, clockText: '', subtitleSearchRunning: false,
     destroyed: false,
   };
@@ -335,6 +351,9 @@ export function mountPlayerOverlay({
       createTransportButton('play', 'Play video', 'toggle-play'),
       makeSkipButton('forward', 'Forward'),
       createTransportButton('next', 'Next episode', 'next'),
+      // Always in the bar: on phones the compact bar keeps only play/pause
+      // (left) and this button (right).
+      createTransportButton('fullscreen', 'Enter fullscreen', 'fullscreen'),
     );
     return row;
   }
@@ -646,6 +665,8 @@ export function mountPlayerOverlay({
     if (name === 'subtitles') {
       const select = root.querySelector('#subtitle-language');
       if (select) select.value = getSelectedSubtitle() == null ? '' : String(getSelectedSubtitle());
+      const auto = root.querySelector('[data-auto-subtitles]');
+      if (auto) auto.checked = Boolean(getAutoSubtitles());
     }
     if (name === 'more-options') updateMoreMenu();
     if (name) showControls();
@@ -676,9 +697,7 @@ export function mountPlayerOverlay({
     frame.dataset.orientation = state.orientation;
     const row = root.querySelector('.player-bottom-row');
     row.dataset.bottomLayout = String(state.bottomLayout);
-    root.querySelectorAll('[data-transport-location]').forEach((container) => {
-      container.hidden = container.dataset.transportLocation === (state.bottomLayout ? 'center' : 'bottom');
-    });
+    applyTransportLocation();
     refs.visibleStatus.hidden = !showVisibleStatus;
     renderRegions();
   }
@@ -1044,13 +1063,93 @@ export function mountPlayerOverlay({
     } catch { onStatus('Picture in picture could not be started.'); }
   }
 
+  function isFullscreen() {
+    return Boolean(document.fullscreenElement) || state.pseudoFullscreen;
+  }
+
+  /**
+   * CSS-only fullscreen used when the Fullscreen API cannot fullscreen an
+   * element (iOS Safari before 16.4, some in-app browsers). The video frame is
+   * pinned over the viewport so the player still fills the phone screen and
+   * every control stays available inside it.
+   */
+  function setPseudoFullscreen(active) {
+    state.pseudoFullscreen = active;
+    frame.classList.toggle('is-fullscreen-fallback', active);
+    document.body.classList.toggle('player-fullscreen-open', active);
+    applyFullscreenState();
+  }
+
   async function toggleFullscreen() {
     try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-      else if (frame.requestFullscreen) await frame.requestFullscreen();
-      else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
-      else onStatus('Fullscreen is unavailable in this browser.');
-    } catch { onStatus('Fullscreen could not be started.'); }
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        return;
+      }
+      if (state.pseudoFullscreen) {
+        setPseudoFullscreen(false);
+        return;
+      }
+      if (frame.requestFullscreen) {
+        await frame.requestFullscreen();
+        return;
+      }
+      setPseudoFullscreen(true);
+    } catch {
+      // A rejected request (or a browser without element fullscreen) still gets
+      // the full-screen phone layout.
+      setPseudoFullscreen(!state.pseudoFullscreen);
+    }
+  }
+
+  /** Reflects fullscreen state in the DOM: compact bar off, all controls on. */
+  function applyFullscreenState() {
+    const active = isFullscreen();
+    root.dataset.fullscreen = String(active);
+    root.classList.toggle('is-fullscreen', active);
+    root.querySelectorAll('[data-action="fullscreen"]').forEach((button) => {
+      const label = active ? 'Exit fullscreen' : 'Enter fullscreen';
+      button.setAttribute('aria-label', label);
+      button.title = label;
+      if (button.classList.contains('player-transport-fullscreen')) {
+        button.replaceChildren(createIcon(active ? 'fullscreen-exit' : 'fullscreen'));
+      } else if (button.classList.contains('player-menu-button')) {
+        button.textContent = active ? 'Exit fullscreen' : 'Enter fullscreen';
+      }
+      button.setAttribute('aria-pressed', String(active));
+    });
+    updateCompactMode();
+    showControls();
+  }
+
+  /**
+   * Phones get one horizontal bar (play/pause + fullscreen) instead of every
+   * control chip; tapping fullscreen shows the complete control set inside the
+   * full-screen player.
+   */
+  function isCompactViewport() {
+    const width = window.innerWidth || document.documentElement?.clientWidth || 0;
+    return usesCompactBar(width, window.matchMedia?.('(pointer: coarse)').matches);
+  }
+
+  function updateCompactMode() {
+    const compact = !isFullscreen() && isCompactViewport();
+    state.compact = compact;
+    root.dataset.compact = String(compact);
+    frame.dataset.compact = String(compact);
+    applyTransportLocation();
+  }
+
+  /**
+   * The transport row exists twice (center and bottom slots); only one is shown.
+   * The compact phone bar always rides the bottom row, whatever the layout
+   * picker says, so play/pause and fullscreen are never lost.
+   */
+  function applyTransportLocation() {
+    const location = state.compact ? 'bottom' : state.bottomLayout ? 'center' : 'bottom';
+    root.querySelectorAll('[data-transport-location]').forEach((container) => {
+      container.hidden = container.dataset.transportLocation !== location;
+    });
   }
 
   function takeScreenshot() {
@@ -1243,6 +1342,7 @@ export function mountPlayerOverlay({
   function onRootChange(event) {
     const target = event.target;
     if (target.matches('#subtitle-language')) onSelectSubtitle(target.value);
+    else if (target.matches('[data-auto-subtitles]')) onToggleAutoSubtitles(target.checked);
     else if (target.matches('#player-volume')) {
       video.volume = Number(target.value);
       if (video.volume > 0 && video.muted) video.muted = false;
@@ -1286,8 +1386,18 @@ export function mountPlayerOverlay({
   }
 
   function onFullscreenChange() {
-    root.classList.toggle('is-fullscreen', Boolean(document.fullscreenElement));
-    showControls();
+    if (document.fullscreenElement && state.pseudoFullscreen) {
+      // A real fullscreen request succeeded: drop the CSS fallback.
+      state.pseudoFullscreen = false;
+      frame.classList.remove('is-fullscreen-fallback');
+      document.body.classList.remove('player-fullscreen-open');
+    }
+    applyFullscreenState();
+  }
+
+  function onViewportChange() {
+    renderOrientation();
+    updateCompactMode();
   }
 
   function onPictureInPictureChange() {
@@ -1360,9 +1470,12 @@ export function mountPlayerOverlay({
   document.addEventListener('fullscreenchange', onFullscreenChange);
   document.addEventListener('enterpictureinpicture', onPictureInPictureChange);
   document.addEventListener('leavepictureinpicture', onPictureInPictureChange);
-  window.addEventListener('resize', renderOrientation);
+  window.addEventListener('resize', onViewportChange);
+  window.addEventListener('orientationchange', onViewportChange);
   refs.lockButton.addEventListener('click', toggleLock);
   renderVisibleStatus();
+  updateCompactMode();
+  applyFullscreenState();
   renderOrientation();
   syncControlLayer();
   updateLockButton();
@@ -1373,6 +1486,8 @@ export function mountPlayerOverlay({
 
   return {
     refresh,
+    isFullscreen,
+    toggleFullscreen,
     destroy() {
       if (state.destroyed) return;
       state.destroyed = true;
@@ -1406,11 +1521,15 @@ export function mountPlayerOverlay({
       document.removeEventListener('fullscreenchange', onFullscreenChange);
       document.removeEventListener('enterpictureinpicture', onPictureInPictureChange);
       document.removeEventListener('leavepictureinpicture', onPictureInPictureChange);
-      window.removeEventListener('resize', renderOrientation);
+      window.removeEventListener('resize', onViewportChange);
+      window.removeEventListener('orientationchange', onViewportChange);
       refs.lockButton.removeEventListener('click', toggleLock);
       root.remove();
       delete frame.dataset.orientation;
+      delete frame.dataset.compact;
       frame.classList.remove('is-rotated');
+      frame.classList.remove('is-fullscreen-fallback');
+      document.body.classList.remove('player-fullscreen-open');
       video.style.filter = '';
       video.style.objectFit = '';
       delete video.dataset.aspect;

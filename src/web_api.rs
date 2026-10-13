@@ -17,6 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,7 @@ use url::Url;
 
 use crate::library::LibraryStore;
 use crate::models::{BrowseMetrics, CatalogItem};
+use crate::player::PlayerKind;
 use crate::providers::ReleaseProvider;
 use crate::providers::models::{
     MediaDetails, PlaybackSource, ProviderError, ProviderKind, Release, ResolutionIntent,
@@ -78,6 +80,8 @@ struct WebState {
     stream_sets: Mutex<HashMap<String, CachedStreamSet>>,
     subtitle_sets: Mutex<HashMap<String, CachedSubtitleSet>>,
     playbacks: Mutex<HashMap<String, WebPlayback>>,
+    /// Local player handoff ("Open in VLC"), resolved once at startup.
+    local_player: LocalPlayerSupport,
     access_token: Option<String>,
     rate_per_minute: u32,
     rate_buckets: Mutex<HashMap<String, TokenBucket>>,
@@ -120,7 +124,74 @@ struct CachedStreamSet {
 #[derive(Clone)]
 struct CachedSubtitleSet {
     created_at: Instant,
-    options: Vec<crate::providers::models::SubtitleOption>,
+    options: Vec<CachedSubtitleOption>,
+}
+
+/// One picker entry: an engine (MovieBox) caption or a public provider file.
+#[derive(Debug, Clone)]
+struct CachedSubtitleOption {
+    name: String,
+    url: String,
+    /// `moviebox`, `opensubtitles`, `podnapisi` or `wyzie`.
+    source: String,
+    /// True for MovieBox captions, which are validated against the MovieBox CDN
+    /// instead of the public provider allowlist.
+    engine: bool,
+    format: String,
+    downloads: Option<u64>,
+    hearing_impaired: bool,
+    language: String,
+}
+
+impl CachedSubtitleOption {
+    fn from_engine(option: crate::providers::models::SubtitleOption) -> Self {
+        let language = crate::subtitles::detect_language_code(&option.name);
+        Self {
+            name: option.name,
+            url: option.url,
+            source: "moviebox".to_string(),
+            engine: true,
+            format: "srt".to_string(),
+            downloads: None,
+            hearing_impaired: false,
+            language,
+        }
+    }
+
+    fn from_public(option: crate::subtitles::PublicSubtitle) -> Self {
+        Self {
+            name: option.name,
+            url: option.url,
+            source: option.source,
+            engine: false,
+            format: option.format,
+            downloads: option.downloads,
+            hearing_impaired: option.hearing_impaired,
+            language: option.language,
+        }
+    }
+
+    /// Rank used when merging: familiar languages first, then the caption that
+    /// belongs to the stream itself, then provider popularity.
+    fn sort_key(&self) -> (u8, u8, std::cmp::Reverse<u64>, u8, String) {
+        (
+            crate::subtitles::language_priority(&self.language),
+            u8::from(!self.engine),
+            std::cmp::Reverse(self.downloads.unwrap_or(0)),
+            subtitle_source_priority(&self.source),
+            self.name.to_ascii_lowercase(),
+        )
+    }
+}
+
+fn subtitle_source_priority(source: &str) -> u8 {
+    match source {
+        "moviebox" => 0,
+        "opensubtitles" => 1,
+        "wyzie" => 2,
+        "podnapisi" => 3,
+        _ => 4,
+    }
 }
 
 struct WebPlayback {
@@ -128,6 +199,24 @@ struct WebPlayback {
     source: PlaybackSource,
     primary_host: String,
     allowed_hosts: HashSet<String>,
+}
+
+/// Local media player handoff ("Open in VLC").
+///
+/// The API runs next to the browser, so it can start a desktop player for
+/// streams the browser cannot decode (H.265/HEVC, `.mkv`, DASH). The player is
+/// always handed a loopback media route from this API, which keeps provider
+/// cookies and headers on the Rust side.
+#[derive(Debug, Clone, Default)]
+struct LocalPlayerSupport {
+    /// Base URL used to build the media route handed to the launched player.
+    base_url: String,
+    /// Players installed on this machine that this API can launch.
+    players: Vec<PlayerKind>,
+    /// Player used when a request does not name one.
+    preferred: Option<PlayerKind>,
+    /// Why launching is unavailable, set when `players` is empty.
+    reason: Option<String>,
 }
 
 struct HttpRequest {
@@ -151,8 +240,22 @@ struct PlayRequest {
     mirror_index: usize,
 }
 
+#[derive(Deserialize)]
+struct OpenPlayerRequest {
+    stream_set_id: String,
+    release_index: usize,
+    #[serde(default)]
+    mirror_index: usize,
+    /// Optional player id (`vlc`, `mpv`, `iina`, `android`).
+    #[serde(default)]
+    player: Option<String>,
+    /// Seconds to skip to, used to resume where the browser left off.
+    #[serde(default)]
+    resume_seconds: Option<u64>,
+}
+
 impl WebState {
-    fn new() -> Self {
+    fn new(bind_addr: &str) -> Self {
         let media_client = crate::net::http_client_builder_base()
             .pool_max_idle_per_host(64)
             .timeout(Duration::from_secs(30))
@@ -185,6 +288,7 @@ impl WebState {
             stream_sets: Mutex::new(HashMap::new()),
             subtitle_sets: Mutex::new(HashMap::new()),
             playbacks: Mutex::new(HashMap::new()),
+            local_player: local_player_support(bind_addr),
             access_token,
             rate_per_minute,
             rate_buckets: Mutex::new(HashMap::new()),
@@ -245,10 +349,180 @@ impl WebState {
     }
 }
 
+/// Resolves the players this API may launch for "Open in VLC".
+///
+/// A desktop player needs the same graphical session the API was started from;
+/// the Android intent openers do not, so they stay available under Termux.
+/// `MOVIEBOX_WEB_LOCAL_PLAYER=0` turns the whole handoff off, which is what a
+/// headless deployment (Docker, Render) effectively gets on its own.
+fn local_player_support(bind_addr: &str) -> LocalPlayerSupport {
+    let mut support = LocalPlayerSupport {
+        base_url: local_media_base_url(bind_addr),
+        ..LocalPlayerSupport::default()
+    };
+    if env_disabled("MOVIEBOX_WEB_LOCAL_PLAYER") {
+        support.reason = Some(
+            "Launching a local player is disabled (MOVIEBOX_WEB_LOCAL_PLAYER is off).".to_string(),
+        );
+        return support;
+    }
+    let detected = crate::player::detect();
+    support.players = detected
+        .iter()
+        .copied()
+        .filter(|kind| player_launchable(*kind))
+        .collect();
+    if support.players.is_empty() {
+        support.reason = Some(if detected.is_empty() {
+            "No VLC, mpv or IINA is installed on this machine.".to_string()
+        } else {
+            "This API has no graphical session, so the installed players cannot be opened."
+                .to_string()
+        });
+        return support;
+    }
+    let configured = std::env::var(crate::player::ENV_MOVIEBOX_PLAYER)
+        .ok()
+        .and_then(|value| PlayerKind::parse(&value))
+        .or_else(|| {
+            crate::config::load()
+                .default_player
+                .as_deref()
+                .filter(|value| !value.eq_ignore_ascii_case("auto"))
+                .and_then(PlayerKind::parse)
+        });
+    support.preferred = configured
+        .filter(|kind| support.players.contains(kind))
+        .or_else(|| {
+            [
+                PlayerKind::Vlc,
+                PlayerKind::Mpv,
+                PlayerKind::Iina,
+                PlayerKind::AndroidIntent,
+            ]
+            .into_iter()
+            .find(|kind| support.players.contains(kind))
+        });
+    support
+}
+
+/// True when this process can actually start `kind` for the user.
+///
+/// A Linux desktop player needs a graphical session in the environment the API
+/// inherited, which is the same rule the TUI applies. Windows and macOS have a
+/// window server once the user session exists, and the Termux Android openers
+/// never need one.
+fn player_launchable(kind: PlayerKind) -> bool {
+    if kind == PlayerKind::AndroidIntent {
+        return true;
+    }
+    if cfg!(target_os = "linux") {
+        return crate::player::has_graphical_display();
+    }
+    true
+}
+
+fn env_disabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .is_some_and(|value| matches!(value.as_str(), "0" | "false" | "off" | "no"))
+}
+
+/// Base URL a launched player uses to reach this API's media routes.
+///
+/// Wildcard bind addresses become loopback because the player runs on this
+/// machine. `MOVIEBOX_WEB_PLAYER_BASE` overrides that for unusual setups, such
+/// as a player on another device that reaches the API through a port forward.
+fn local_media_base_url(bind_addr: &str) -> String {
+    local_media_base_url_with(
+        std::env::var("MOVIEBOX_WEB_PLAYER_BASE").ok().as_deref(),
+        bind_addr,
+    )
+}
+
+fn local_media_base_url_with(override_base: Option<&str>, bind_addr: &str) -> String {
+    if let Some(override_base) = override_base.map(str::trim).filter(|base| !base.is_empty()) {
+        return override_base.trim_end_matches('/').to_string();
+    }
+    if let Ok(socket) = bind_addr.trim().parse::<std::net::SocketAddr>() {
+        let ip = socket.ip();
+        let host = if ip.is_unspecified() {
+            "127.0.0.1".to_string()
+        } else if ip.is_ipv6() {
+            format!("[{ip}]")
+        } else {
+            ip.to_string()
+        };
+        return format!("http://{host}:{}", socket.port());
+    }
+    format!("http://{}", bind_addr.trim().trim_end_matches('/'))
+}
+
+/// Picks the player for one launch: an explicit request wins, then the
+/// configured preference, then the best player this machine has.
+fn select_local_player(
+    support: &LocalPlayerSupport,
+    requested: Option<&str>,
+) -> Result<PlayerKind, String> {
+    if support.players.is_empty() {
+        return Err(support
+            .reason
+            .clone()
+            .unwrap_or_else(|| "No local media player is available on this machine.".to_string()));
+    }
+    if let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) {
+        let kind = PlayerKind::parse(requested).ok_or_else(|| {
+            format!("Unknown player \"{requested}\": use vlc, mpv, iina or android.")
+        })?;
+        if !support.players.contains(&kind) {
+            return Err(format!(
+                "{} is not installed on this machine (available: {}).",
+                kind.label(),
+                player_labels(&support.players)
+            ));
+        }
+        return Ok(kind);
+    }
+    support
+        .preferred
+        .or_else(|| support.players.first().copied())
+        .ok_or_else(|| "No local media player is available on this machine.".to_string())
+}
+
+fn player_labels(players: &[PlayerKind]) -> String {
+    players
+        .iter()
+        .map(|player| player.label())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Launches `kind` with a media URL from this API and leaves it running after
+/// the request ends, the same way the TUI detaches its players.
+fn spawn_local_player(
+    kind: PlayerKind,
+    media_url: &str,
+    resume_seconds: Option<u64>,
+) -> Result<(), String> {
+    // No provider headers travel with the URL: the media route forwards them.
+    let mut command =
+        crate::player::command(kind, media_url, None, &[], None, resume_seconds, None, None);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::player::configure_detached_process(&mut command);
+    match command.spawn() {
+        Ok(_child) => Ok(()),
+        Err(error) => Err(format!("Could not start {}: {error}", kind.label())),
+    }
+}
+
 /// Start the local web API. Use `127.0.0.1:8787` for a same-device frontend.
 pub async fn run(addr: &str) -> io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    let state = Arc::new(WebState::new());
+    let state = Arc::new(WebState::new(addr));
     eprintln!("MovieBox-Tui web API listening on http://{addr}");
 
     loop {
@@ -543,6 +817,10 @@ async fn route_api(request: &HttpRequest, state: &WebState) -> HttpResponse {
             subtitle_file(query, state).await
         }
         "/api/play" if request.method == "POST" => play(request, state).await,
+        "/api/player" if request.method == "GET" || request.method == "HEAD" => {
+            player_support_json(state)
+        }
+        "/api/player/open" if request.method == "POST" => open_player(request, state).await,
         "/api/suggest" if request.method == "GET" || request.method == "HEAD" => {
             suggest(query, state).await
         }
@@ -1468,32 +1746,65 @@ async fn search_subtitles(query: &str, state: &WebState) -> HttpResponse {
         return HttpResponse::error(400, "Season and episode must both be provided");
     }
 
-    let result = tokio::time::timeout(
-        Duration::from_secs(45),
-        state.service.search_captions_by_title(
-            title,
-            (!year.is_empty()).then_some(year),
-            season,
-            episode,
-        ),
-    )
-    .await;
-    let options = match result {
-        Ok(Ok(options)) => options,
-        Ok(Err(error)) => {
-            log::warn!("subtitle search failed for requested title: {error}");
-            return HttpResponse::error(502, "Online subtitle search is temporarily unavailable");
+    // Engine captions (MovieBox) and the public providers are searched at the
+    // same time; either side failing still returns the other's results.
+    let engine_search = async {
+        match tokio::time::timeout(
+            Duration::from_secs(45),
+            state.service.search_captions_by_title(
+                title,
+                (!year.is_empty()).then_some(year),
+                season,
+                episode,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(options)) => options,
+            Ok(Err(error)) => {
+                log::warn!("engine subtitle search failed: {error}");
+                Vec::new()
+            }
+            Err(_) => {
+                log::warn!("engine subtitle search timed out for the requested title");
+                Vec::new()
+            }
         }
-        Err(_) => return HttpResponse::error(504, "Online subtitle search timed out"),
     };
+    let public_search = async {
+        tokio::time::timeout(
+            crate::subtitles::SEARCH_BUDGET,
+            crate::subtitles::search(
+                &state.media_client,
+                &crate::subtitles::SubtitleQuery {
+                    title: title.to_string(),
+                    year: (!year.is_empty()).then(|| year.to_string()),
+                    season,
+                    episode,
+                },
+            ),
+        )
+        .await
+        .unwrap_or_default()
+    };
+    let (engine_options, public_options) = tokio::join!(engine_search, public_search);
 
-    // Only retain MovieBox caption CDN URLs. URLs stay server-side and each
-    // redirect is checked again before a subtitle file is fetched.
-    let options = options
+    let mut options: Vec<CachedSubtitleOption> = engine_options
         .into_iter()
+        // Only retain MovieBox caption CDN URLs. URLs stay server-side and each
+        // redirect is checked again before a subtitle file is fetched.
         .filter(|option| validate_moviebox_caption_url(&option.url).is_ok())
-        .take(32)
-        .collect::<Vec<_>>();
+        .map(CachedSubtitleOption::from_engine)
+        .collect();
+    options.extend(
+        public_options
+            .into_iter()
+            .filter(|option| validate_public_subtitle_url(&option.url).is_ok())
+            .map(CachedSubtitleOption::from_public),
+    );
+    options.sort_by_key(CachedSubtitleOption::sort_key);
+    options.truncate(crate::subtitles::MAX_SUBTITLES);
+
     let mut subtitle_set_id = None;
     if !options.is_empty() {
         let token = opaque_token();
@@ -1518,14 +1829,30 @@ async fn search_subtitles(query: &str, state: &WebState) -> HttpResponse {
         subtitle_set_id = Some(token);
     }
 
+    let sources = options
+        .iter()
+        .map(|option| option.source.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
     HttpResponse::json(
         200,
         json!({
             "subtitle_set_id": subtitle_set_id,
+            "sources": sources,
             "subtitles": options
                 .iter()
                 .enumerate()
-                .map(|(index, option)| json!({ "index": index, "name": option.name }))
+                .map(|(index, option)| json!({
+                    "index": index,
+                    "name": option.name,
+                    "language": option.language,
+                    "source": option.source,
+                    "format": option.format,
+                    "downloads": option.downloads,
+                    "hearing_impaired": option.hearing_impaired,
+                }))
                 .collect::<Vec<_>>(),
         }),
     )
@@ -1564,11 +1891,77 @@ async fn subtitle_file(query: &str, state: &WebState) -> HttpResponse {
         }
     };
 
-    let text = match fetch_moviebox_caption(&state.subtitle_client, &option.url).await {
-        Ok(text) => text,
-        Err(message) => return HttpResponse::error(502, message),
+    let fetched = if option.engine {
+        fetch_moviebox_caption(&state.subtitle_client, &option.url).await
+    } else {
+        fetch_public_subtitle(&state.subtitle_client, &option.url).await
     };
-    HttpResponse::json(200, json!({ "text": text }))
+    match fetched {
+        Ok(text) => HttpResponse::json(
+            200,
+            json!({
+                "text": text,
+                "name": option.name,
+                "source": option.source,
+                "language": option.language,
+            }),
+        ),
+        Err(message) => HttpResponse::error(502, message),
+    }
+}
+
+/// Downloads one public provider subtitle, re-validating every redirect hop
+/// against the provider allowlist and unpacking zip/gzip payloads so the
+/// browser only ever receives text it can convert to WebVTT.
+async fn fetch_public_subtitle(client: &reqwest::Client, raw_url: &str) -> Result<String, String> {
+    let mut url = validate_public_subtitle_url(raw_url)?;
+    for redirect_count in 0..=MAX_SUBTITLE_REDIRECTS {
+        let response = client
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|_| "Could not download this subtitle file".to_string())?;
+        if response.status().is_redirection() {
+            if redirect_count == MAX_SUBTITLE_REDIRECTS {
+                return Err("Subtitle source redirected too many times".to_string());
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| "Subtitle source returned an invalid redirect".to_string())?;
+            url = validate_public_subtitle_url(
+                url.join(location)
+                    .map_err(|_| "Subtitle source returned an invalid redirect".to_string())?
+                    .as_str(),
+            )?;
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(format!(
+                "Subtitle source returned HTTP {}",
+                response.status().as_u16()
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_SUBTITLE_BYTES as u64)
+        {
+            return Err("Subtitle file is too large".to_string());
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| "Could not read this subtitle file".to_string())?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_SUBTITLE_BYTES {
+                return Err("Subtitle file is too large".to_string());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return crate::subtitles::decode_subtitle_file(&bytes);
+    }
+    Err("Subtitle source redirected too many times".to_string())
 }
 
 async fn fetch_moviebox_caption(client: &reqwest::Client, raw_url: &str) -> Result<String, String> {
@@ -1620,6 +2013,23 @@ async fn fetch_moviebox_caption(client: &reqwest::Client, raw_url: &str) -> Resu
         return Ok(String::from_utf8_lossy(&bytes).into_owned());
     }
     Err("Subtitle source redirected too many times".to_string())
+}
+
+/// Public subtitle URLs (OpenSubtitles, Podnapisi, Wyzie, …) are fetched
+/// server-side, so they must be https on an allowlisted provider host.
+fn validate_public_subtitle_url(raw_url: &str) -> Result<Url, String> {
+    let url =
+        Url::parse(raw_url).map_err(|_| "Subtitle source returned an invalid URL".to_string())?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return Err("Subtitle source returned an unsafe URL".to_string());
+    }
+    let Some(host) = url.host_str() else {
+        return Err("Subtitle source returned an invalid URL".to_string());
+    };
+    if !crate::subtitles::is_allowed_subtitle_host(host) {
+        return Err("Subtitle source is not a trusted provider".to_string());
+    }
+    Ok(url)
 }
 
 fn validate_moviebox_caption_url(raw_url: &str) -> Result<Url, String> {
@@ -1725,58 +2135,125 @@ async fn play(request: &HttpRequest, state: &WebState) -> HttpResponse {
             Ok(source) => source,
             Err(message) => return HttpResponse::error(502, message),
         };
-    let source_url = match Url::parse(&source.url) {
-        Ok(url)
-            if matches!(url.scheme(), "http" | "https")
-                && url.host_str().is_some()
-                && url.username().is_empty()
-                && url.password().is_none() =>
-        {
-            url
-        }
-        _ => return HttpResponse::error(502, "The stream resolver returned an invalid URL"),
+    let source_url = match playback_source_url(&source) {
+        Ok(url) => url,
+        Err(message) => return HttpResponse::error(502, message),
     };
-    let primary_host = authority(&source_url);
-    let token = opaque_token();
-    let mut allowed_hosts = HashSet::new();
-    allowed_hosts.insert(primary_host.clone());
-
-    let media_url = media_route(&token, &source_url);
-    let stream_type = stream_type(&source_url);
-    {
-        let mut playbacks = state.playbacks.lock().await;
-        playbacks.retain(|_, value| value.created_at.elapsed() < PLAYBACK_TTL);
-        if playbacks.len() >= MAX_PLAYBACK_SESSIONS {
-            if let Some(oldest) = playbacks
-                .iter()
-                .min_by_key(|(_, value)| value.created_at)
-                .map(|(key, _)| key.clone())
-            {
-                playbacks.remove(&oldest);
-            }
-        }
-        playbacks.insert(
-            token,
-            WebPlayback {
-                created_at: Instant::now(),
-                source: source.clone(),
-                primary_host,
-                allowed_hosts,
-            },
-        );
-    }
+    let media_url = open_media_session(state, &source, &source_url).await;
 
     HttpResponse::json(
         200,
         json!({
             "playback_url": media_url,
-            "stream_type": stream_type,
+            "stream_type": stream_type(&source_url),
             "source_label": source.source_label,
             "quality": release.quality,
             "title": release.filename,
             "provider": provider_id(stream_set.provider),
         }),
     )
+}
+
+/// Reports which local players the browser may hand a stream to.
+fn player_support_json(state: &WebState) -> HttpResponse {
+    HttpResponse::json(
+        200,
+        json!({
+            "available": !state.local_player.players.is_empty(),
+            "players": player_payload(&state.local_player.players),
+            "default": state.local_player.preferred.map(|kind| kind.config_key()),
+            "reason": state.local_player.reason,
+        }),
+    )
+}
+
+fn player_payload(players: &[PlayerKind]) -> Value {
+    Value::Array(
+        players
+            .iter()
+            .map(|kind| json!({ "id": kind.config_key(), "label": kind.label() }))
+            .collect(),
+    )
+}
+
+/// "Open in VLC": resolves the selected release, registers the same loopback
+/// media route the browser would use and starts a local player on it.
+///
+/// The player check comes first, so a deployment without a local player (or a
+/// headless API) never resolves provider links just to fail afterwards.
+async fn open_player(request: &HttpRequest, state: &WebState) -> HttpResponse {
+    let request: OpenPlayerRequest = match serde_json::from_slice(&request.body) {
+        Ok(value) => value,
+        Err(error) => return HttpResponse::error(400, format!("Invalid player request: {error}")),
+    };
+    let kind = match select_local_player(&state.local_player, request.player.as_deref()) {
+        Ok(kind) => kind,
+        Err(message) => {
+            return HttpResponse::json(
+                409,
+                json!({
+                    "error": message,
+                    "available": !state.local_player.players.is_empty(),
+                    "players": player_payload(&state.local_player.players),
+                }),
+            );
+        }
+    };
+
+    let stream_set = {
+        let mut sets = state.stream_sets.lock().await;
+        sets.retain(|_, value| value.created_at.elapsed() < STREAM_SET_TTL);
+        match sets.get(&request.stream_set_id) {
+            Some(value) => value.clone(),
+            None => {
+                return HttpResponse::error(
+                    410,
+                    "Stream list expired. Refresh the stream list and try again.",
+                );
+            }
+        }
+    };
+    let release = match stream_set.releases.get(request.release_index) {
+        Some(release) => release.clone(),
+        None => return HttpResponse::error(400, "Selected stream does not exist"),
+    };
+
+    let source =
+        match resolve_source(&state.service, &stream_set, &release, request.mirror_index).await {
+            Ok(source) => source,
+            Err(message) => return HttpResponse::error(502, message),
+        };
+    let source_url = match playback_source_url(&source) {
+        Ok(url) => url,
+        Err(message) => return HttpResponse::error(502, message),
+    };
+    let route = open_media_session(state, &source, &source_url).await;
+    let media_url = format!("{}{route}", state.local_player.base_url);
+    let resume_seconds = request.resume_seconds.filter(|seconds| *seconds > 0);
+    let spawn_url = media_url.clone();
+    let spawned =
+        tokio::task::spawn_blocking(move || spawn_local_player(kind, &spawn_url, resume_seconds))
+            .await;
+
+    match spawned {
+        Ok(Ok(())) => HttpResponse::json(
+            200,
+            json!({
+                "ok": true,
+                "available": true,
+                "player": kind.config_key(),
+                "label": kind.label(),
+                "url": media_url,
+                "stream_type": stream_type(&source_url),
+                "title": release.filename,
+                "resume_seconds": resume_seconds.unwrap_or(0),
+            }),
+        ),
+        Ok(Err(message)) => HttpResponse::error(502, message),
+        Err(error) => {
+            HttpResponse::error(500, format!("Could not start the media player: {error}"))
+        }
+    }
 }
 
 async fn proxy_media(
@@ -2423,6 +2900,54 @@ fn parse_media_target(target: &str) -> Option<(String, Url)> {
     Some((token.to_string(), url))
 }
 
+/// Rejects resolver output the media proxy cannot safely fetch.
+fn playback_source_url(source: &PlaybackSource) -> Result<Url, &'static str> {
+    match Url::parse(&source.url) {
+        Ok(url)
+            if matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none() =>
+        {
+            Ok(url)
+        }
+        _ => Err("The stream resolver returned an invalid URL"),
+    }
+}
+
+/// Registers a short-lived media session for `source` and returns the
+/// same-origin route (`/api/media/{token}/…`) that plays it. Browser playback
+/// and the local player handoff share this, so both keep provider auth
+/// server-side and both survive a page refresh.
+async fn open_media_session(state: &WebState, source: &PlaybackSource, source_url: &Url) -> String {
+    let primary_host = authority(source_url);
+    let mut allowed_hosts = HashSet::new();
+    allowed_hosts.insert(primary_host.clone());
+    let token = opaque_token();
+    let route = media_route(&token, source_url);
+    let mut playbacks = state.playbacks.lock().await;
+    playbacks.retain(|_, value| value.created_at.elapsed() < PLAYBACK_TTL);
+    if playbacks.len() >= MAX_PLAYBACK_SESSIONS {
+        if let Some(oldest) = playbacks
+            .iter()
+            .min_by_key(|(_, value)| value.created_at)
+            .map(|(key, _)| key.clone())
+        {
+            playbacks.remove(&oldest);
+        }
+    }
+    playbacks.insert(
+        token,
+        WebPlayback {
+            created_at: Instant::now(),
+            source: source.clone(),
+            primary_host,
+            allowed_hosts,
+        },
+    );
+    route
+}
+
 fn stream_type(url: &Url) -> &'static str {
     let url_str = url.as_str().to_ascii_lowercase();
     let path = url.path().to_ascii_lowercase();
@@ -2539,6 +3064,187 @@ mod tests {
         assert!(validate_moviebox_caption_url("https://user@pacdn.aoneroom.com/en.srt").is_err());
     }
 
+    fn local_support(
+        players: Vec<PlayerKind>,
+        preferred: Option<PlayerKind>,
+    ) -> LocalPlayerSupport {
+        LocalPlayerSupport {
+            base_url: "http://127.0.0.1:8787".to_string(),
+            players,
+            preferred,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn local_media_base_url_becomes_loopback_for_wildcard_binds() {
+        assert_eq!(
+            local_media_base_url_with(None, "127.0.0.1:8787"),
+            "http://127.0.0.1:8787"
+        );
+        assert_eq!(
+            local_media_base_url_with(None, "0.0.0.0:8787"),
+            "http://127.0.0.1:8787"
+        );
+        assert_eq!(
+            local_media_base_url_with(None, "[::]:8787"),
+            "http://127.0.0.1:8787"
+        );
+        assert_eq!(
+            local_media_base_url_with(None, "[::1]:8787"),
+            "http://[::1]:8787"
+        );
+        assert_eq!(
+            local_media_base_url_with(None, "localhost:8787"),
+            "http://localhost:8787"
+        );
+        // An explicit base wins so a player on another device can be targeted.
+        assert_eq!(
+            local_media_base_url_with(Some(" http://192.168.1.5:9000/ "), "127.0.0.1:8787"),
+            "http://192.168.1.5:9000"
+        );
+    }
+
+    #[test]
+    fn select_local_player_honours_requests_and_the_configured_default() {
+        let support = local_support(
+            vec![PlayerKind::Vlc, PlayerKind::Mpv],
+            Some(PlayerKind::Mpv),
+        );
+        assert_eq!(
+            select_local_player(&support, None).unwrap(),
+            PlayerKind::Mpv
+        );
+        assert_eq!(
+            select_local_player(&support, Some(" VLC ")).unwrap(),
+            PlayerKind::Vlc
+        );
+        // Unknown names and players that are not installed are rejected with a
+        // message the browser can show before it falls back to copying a link.
+        let unknown = select_local_player(&support, Some("chrome")).unwrap_err();
+        assert!(unknown.contains("Unknown player"), "{unknown}");
+        let missing = select_local_player(&support, Some("iina")).unwrap_err();
+        assert!(missing.contains("available: VLC, MPV"), "{missing}");
+    }
+
+    #[test]
+    fn select_local_player_falls_back_to_the_best_available_player() {
+        let support = local_support(vec![PlayerKind::Mpv, PlayerKind::Iina], None);
+        assert_eq!(
+            select_local_player(&support, None).unwrap(),
+            PlayerKind::Mpv
+        );
+
+        let mut unavailable = local_support(Vec::new(), None);
+        unavailable.reason = Some("No VLC, mpv or IINA is installed on this machine.".into());
+        let error = select_local_player(&unavailable, Some("vlc")).unwrap_err();
+        assert!(error.contains("No VLC"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn open_player_reports_missing_players_before_resolving_streams() {
+        let mut state = WebState::new("127.0.0.1:8787");
+        state.local_player = local_support(Vec::new(), None);
+        state.local_player.reason =
+            Some("No VLC, mpv or IINA is installed on this machine.".into());
+        let request = HttpRequest {
+            method: "POST".into(),
+            target: "/api/player/open".into(),
+            headers: Headers::new(),
+            body: br#"{"stream_set_id":"expired","release_index":0}"#.to_vec(),
+        };
+
+        // No player means no upstream work: the stream set id is never looked up.
+        let response = open_player(&request, &state).await;
+        assert_eq!(response.status, 409);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["available"], json!(false));
+        assert!(body["error"].as_str().unwrap().contains("No VLC"), "{body}");
+    }
+
+    #[test]
+    fn player_support_json_lists_detected_players() {
+        let mut state = WebState::new("127.0.0.1:8787");
+        state.local_player = local_support(vec![PlayerKind::Vlc], Some(PlayerKind::Vlc));
+        let response = player_support_json(&state);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["available"], json!(true));
+        assert_eq!(body["default"], json!("vlc"));
+        assert_eq!(body["players"][0]["id"], json!("vlc"));
+        assert_eq!(body["players"][0]["label"], json!("VLC"));
+        assert_eq!(body["reason"], json!(null));
+    }
+
+    #[test]
+    fn public_subtitle_urls_are_limited_to_provider_hosts() {
+        assert!(validate_public_subtitle_url("https://dl.opensubtitles.org/x/a.srt").is_ok());
+        assert!(
+            validate_public_subtitle_url("https://opensubtitles-v3.strem.io/subtitles/movie/x.srt")
+                .is_ok()
+        );
+        assert!(
+            validate_public_subtitle_url("https://www.podnapisi.net/subtitles/1/download").is_ok()
+        );
+        assert!(validate_public_subtitle_url("http://dl.opensubtitles.org/a.srt").is_err());
+        assert!(validate_public_subtitle_url("https://127.0.0.1/a.srt").is_err());
+        assert!(validate_public_subtitle_url("https://evil.test/a.srt").is_err());
+        assert!(
+            validate_public_subtitle_url("https://dl.opensubtitles.org.evil.test/a.srt").is_err()
+        );
+        assert!(validate_public_subtitle_url("https://user@dl.opensubtitles.org/a.srt").is_err());
+        assert!(validate_public_subtitle_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn merged_subtitles_rank_engine_captions_first_for_english() {
+        let engine = vec![crate::providers::models::SubtitleOption {
+            name: "English".to_string(),
+            url: "https://pacdn.aoneroom.com/other/captions/en.srt".to_string(),
+        }];
+        let public = vec![
+            crate::subtitles::PublicSubtitle {
+                name: "Hindi · OpenSubtitles · 1080p".to_string(),
+                url: "https://dl.opensubtitles.org/hi.srt".to_string(),
+                language: "hi".to_string(),
+                source: "opensubtitles".to_string(),
+                format: "srt".to_string(),
+                downloads: Some(500),
+                hearing_impaired: false,
+            },
+            crate::subtitles::PublicSubtitle {
+                name: "English · Podnapisi · WEB-DL".to_string(),
+                url: "https://www.podnapisi.net/subtitles/1/download".to_string(),
+                language: "en".to_string(),
+                source: "podnapisi".to_string(),
+                format: "zip".to_string(),
+                downloads: Some(90),
+                hearing_impaired: false,
+            },
+        ];
+        let mut options: Vec<CachedSubtitleOption> = engine
+            .into_iter()
+            .map(CachedSubtitleOption::from_engine)
+            .collect();
+        options.extend(public.into_iter().map(CachedSubtitleOption::from_public));
+        options.sort_by_key(CachedSubtitleOption::sort_key);
+
+        let names: Vec<&str> = options.iter().map(|option| option.name.as_str()).collect();
+        // English engine caption first, then English public, then Hindi.
+        assert_eq!(
+            names,
+            vec![
+                "English",
+                "English · Podnapisi · WEB-DL",
+                "Hindi · OpenSubtitles · 1080p"
+            ]
+        );
+        assert_eq!(options[0].language, "en");
+        assert!(options[0].engine);
+        assert!(!options[1].engine);
+        assert_eq!(options[1].format, "zip");
+        assert_eq!(options[2].language, "hi");
+    }
+
     #[test]
     fn media_route_rejects_non_http_targets_and_userinfo() {
         assert!(parse_media_target("/api/media/token/file/example.test/path").is_none());
@@ -2642,7 +3348,7 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limiter_throttles_requests_over_budget() {
-        let mut state = WebState::new();
+        let mut state = WebState::new("127.0.0.1:8787");
         state.rate_per_minute = 12;
         let burst = (f64::from(state.rate_per_minute) / 6.0).max(10.0) as usize;
         for _ in 0..burst {
@@ -2703,6 +3409,7 @@ mod tests {
                     allowed_hosts,
                 },
             )])),
+            local_player: LocalPlayerSupport::default(),
             access_token: None,
             rate_per_minute: 0,
             rate_buckets: Mutex::new(HashMap::new()),
@@ -2796,6 +3503,7 @@ mod tests {
                     allowed_hosts,
                 },
             )])),
+            local_player: LocalPlayerSupport::default(),
             access_token: None,
             rate_per_minute: 0,
             rate_buckets: Mutex::new(HashMap::new()),
