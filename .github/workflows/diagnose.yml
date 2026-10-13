@@ -39,20 +39,28 @@ jobs:
           set +e
           cargo clippy --all-targets --all-features --locked -- -D warnings > /tmp/clippy.log 2>&1
           echo "clippy exit: $?"
-          tail -n 120 /tmp/clippy.log > /tmp/clippy-head.log
+          grep -vE "Downloaded|Downloading|Updating|Compiling|Checking|Blocking" /tmp/clippy.log > /tmp/clippy-filtered.log
           i=0
           while IFS= read -r line; do
             [ -z "$line" ] && continue
             i=$((i + 1))
             [ "$i" -gt 45 ] && break
             printf '::error title=clippy %02d::%s\n' "$i" "$(printf '%s' "$line" | tr -d '\r')"
-          done < /tmp/clippy-head.log
+          done < /tmp/clippy-filtered.log
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Test report
+        env:
+          MOVIEBOX_CONFIG_DIR: ${{ runner.temp }}/mb_config
+          MOVIEBOX_DATA_DIR: ${{ runner.temp }}/mb_data
         run: |
           set +e
           cargo nextest run --all-features --locked --no-fail-fast > /tmp/test.log 2>&1
           echo "nextest exit: $?"
-          tail -n 120 /tmp/test.log > /tmp/test-filtered.log
+          grep -nE "FAIL|panicked|assertion|left:|right:|failures|Summary" /tmp/test.log > /tmp/test-filtered.log
+          tail -n 40 /tmp/test.log >> /tmp/test-filtered.log
           i=0
           while IFS= read -r line; do
             [ -z "$line" ] && continue

@@ -274,9 +274,10 @@ pub fn parse_opensubtitles_v3(payload: &Value) -> Vec<PublicSubtitle> {
             .unwrap_or_default()
             .trim()
             .to_ascii_lowercase();
+        // Only an explicit label becomes part of the picker name; the provider
+        // id is an opaque hash, not something to show.
         let label = entry
             .get("label")
-            .or_else(|| entry.get("id"))
             .and_then(Value::as_str)
             .unwrap_or_default()
             .trim()
@@ -683,9 +684,9 @@ fn guess_format(url: &str) -> &'static str {
         "zip"
     } else if path.ends_with(".gz") {
         "gz"
-    } else if path.ends_with(".srt") {
-        "srt"
     } else {
+        // Nearly every provider serves SRT; the file is sniffed again when it
+        // is downloaded.
         "srt"
     }
 }
@@ -814,13 +815,21 @@ mod tests {
             parse_cinemeta_search(&payload, "Interstellar", Some("2014"), false),
             Some("tt0816692".to_string())
         );
-        // A series search ignores movie entries.
-        let series = json!({
+        // A series search skips entries that are typed as movies…
+        let mismatched = json!({
             "metas": [{ "id": "tt1111111", "name": "Some Show", "type": "movie", "releaseInfo": "2020" }]
         });
         assert_eq!(
-            parse_cinemeta_search(&series, "Some Show", None, true),
-            Some("tt1111111".to_string())
+            parse_cinemeta_search(&mismatched, "Some Show", None, true),
+            None
+        );
+        // …and uses a matching series entry.
+        let matched = json!({
+            "metas": [{ "id": "tt2222222", "name": "Some Show", "type": "series", "releaseInfo": "2020" }]
+        });
+        assert_eq!(
+            parse_cinemeta_search(&matched, "Some Show", None, true),
+            Some("tt2222222".to_string())
         );
         assert_eq!(parse_cinemeta_search(&json!({}), "X", None, false), None);
     }
