@@ -437,6 +437,28 @@ function makeMockApiPlugin(enabled) {
           });
         }
 
+        // --- Local player handoff ("Open in VLC") ---------------------------
+        // The demo runs without the Rust engine, so it has no local player to
+        // launch: the button copies the link instead. Start
+        // `cargo run -- --web-api` to open VLC for real.
+        if (path === '/api/player' && req.method !== 'POST') {
+          return json(res, 200, {
+            available: false,
+            players: [],
+            default: null,
+            reason: 'Demo mode has no local player. Run the Rust engine to open VLC.',
+          });
+        }
+
+        if (path === '/api/player/open' && req.method === 'POST') {
+          await readBody();
+          return json(res, 409, {
+            error: 'Demo mode has no local player. Run the Rust engine to open VLC.',
+            available: false,
+            players: [],
+          });
+        }
+
         // --- Library -------------------------------------------------------
         if (path === '/api/library' && req.method !== 'POST') {
           return json(res, 200, { ...libraryState, synced_at: Math.floor(Date.now() / 1000) });

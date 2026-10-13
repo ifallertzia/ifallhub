@@ -78,10 +78,13 @@ export function apiUrl(path, params = {}) {
 }
 
 export class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, payload = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    // Routes such as `/api/player/open` send `available`/`players` alongside
+    // the error so the UI can pick a fallback without a second request.
+    this.payload = payload;
   }
 }
 
@@ -102,7 +105,11 @@ export async function api(path, options = {}) {
   }
   if (response.status === 404 && options.onMissing) return options.onMissing();
   if (!response.ok) {
-    throw new ApiError(payload.error || `Request failed (${response.status})`, response.status);
+    throw new ApiError(
+      payload.error || `Request failed (${response.status})`,
+      response.status,
+      payload,
+    );
   }
   return payload;
 }
@@ -190,6 +197,34 @@ export function play({ streamSetId, releaseIndex, mirrorIndex = 0 } = {}, option
       stream_set_id: streamSetId,
       release_index: releaseIndex,
       mirror_index: mirrorIndex,
+    }),
+    ...options,
+  });
+}
+
+/** Which external players the engine can launch on this machine. */
+export function playerSupport(options = {}) {
+  return api('/api/player', options);
+}
+
+/**
+ * Hands one release to a local player (VLC, mpv, IINA). The engine resolves
+ * the stream and opens the player next to it; the browser never sees the
+ * provider headers.
+ */
+export function openInPlayer(
+  { streamSetId, releaseIndex, mirrorIndex = 0, player = '', resumeSeconds = 0 } = {},
+  options = {},
+) {
+  return api('/api/player/open', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      stream_set_id: streamSetId,
+      release_index: releaseIndex,
+      mirror_index: mirrorIndex,
+      ...(player ? { player } : {}),
+      ...(resumeSeconds > 0 ? { resume_seconds: Math.round(resumeSeconds) } : {}),
     }),
     ...options,
   });

@@ -4,7 +4,13 @@
 import * as api from '../lib/api.js';
 import * as library from '../lib/library.js';
 import { appendPlaybackLink } from '../ui/playback-links.js';
-import { setCurrentPlayback, clearCurrentPlayback, createVlcButton, hasPlaybackUrl, copyPlaybackUrl } from '../ui/vlc-button.js';
+import {
+  setCurrentPlayback,
+  clearCurrentPlayback,
+  createVlcButton,
+  describeOpenResult,
+  showVlcToast,
+} from '../ui/vlc-button.js';
 import { cardHtml, rowHtml, spinnerHtml } from '../ui/components.js';
 import {
   SERVER_ROTATION,
@@ -177,8 +183,9 @@ export async function renderWatch(container, route) {
 }
 
 /**
- * Add VLC button to the player UI
- * This button allows users to copy the playback URL for use in external players like VLC/MPV
+ * Add the "Open in VLC" button to the player UI. Clicking it asks the engine to
+ * start a local player on the stream the page is playing; when this deployment
+ * has no local player the engine copies the playback link instead.
  */
 function addVlcButtonToPlayer(container) {
   // Remove any existing VLC button
@@ -189,33 +196,17 @@ function addVlcButtonToPlayer(container) {
   
   // Create VLC button
   const vlcButton = createVlcButton({
-    text: 'Open in VLC',
     className: 'ghost-button',
-    onClick: async () => {
-      if (!hasPlaybackUrl()) {
-        showVlcToast('No playback URL available. Start a stream first.', 'error');
-        return;
-      }
-      
-      const copied = await copyPlaybackUrl();
-      
-      if (copied) {
-        showVlcToast('URL copied! Open VLC → Media → Open Network Stream → Paste → Play', 'success');
-        
-        // Update button text temporarily
-        const span = vlcButton.querySelector('span');
-        if (span) {
-          const originalText = span.textContent;
-          span.textContent = 'Copied!';
-          
-          setTimeout(() => {
-            span.textContent = originalText;
-          }, 2000);
-        }
-      } else {
-        showVlcToast('Could not copy automatically. Check console for URL.', 'error');
-      }
-    }
+    target: () => ({
+      streamSetId: state.entry?.streamSetId || '',
+      releaseIndex: state.entry?.releases?.[state.selected]?.serverIndex ?? 0,
+      mirrorIndex: 0,
+      resumeSeconds: Math.max(0, Math.round(state.resumeAt || 0)),
+    }),
+    onResult: (result) => {
+      const summary = describeOpenResult(result);
+      showVlcToast(summary.message, summary.kind);
+    },
   });
   
   // Find the player controls area to add the button
@@ -234,112 +225,6 @@ function addVlcButtonToPlayer(container) {
   }
 }
 
-/**
- * Show VLC toast notification
- */
-function showVlcToast(message, type = 'info') {
-  const toast = document.getElementById('vlc-toast') || createVlcToastContainer();
-  
-  if (toast._timeout) {
-    clearTimeout(toast._timeout);
-  }
-  
-  toast.textContent = message;
-  toast.className = `vlc-toast vlc-toast-${type}`;
-  toast.hidden = false;
-  
-  toast._timeout = setTimeout(() => {
-    toast.hidden = true;
-    toast._timeout = null;
-  }, 5000);
-}
-
-/**
- * Create VLC toast container
- */
-function createVlcToastContainer() {
-  const toast = document.createElement('div');
-  toast.id = 'vlc-toast';
-  toast.className = 'vlc-toast';
-  toast.hidden = true;
-  toast.role = 'status';
-  toast.ariaLive = 'polite';
-  
-  document.body.appendChild(toast);
-  
-  if (!document.getElementById('vlc-toast-css')) {
-    const style = document.createElement('style');
-    style.id = 'vlc-toast-css';
-    style.textContent = `
-      .vlc-toast {
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        padding: 12px 16px;
-        border-radius: 8px;
-        background: #1a1a1a;
-        color: #fff;
-        font-size: 13px;
-        font-family: inherit;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-        z-index: 9999;
-        max-width: 400px;
-        transition: opacity 0.2s, transform 0.2s;
-      }
-      .vlc-toast.hidden {
-        opacity: 0;
-        transform: translateY(10px);
-        pointer-events: none;
-      }
-      .vlc-toast-success {
-        border-left: 3px solid #22c55e;
-      }
-      .vlc-toast-error {
-        border-left: 3px solid #ef4444;
-        background: #2a0a0a;
-      }
-      .vlc-toast-info {
-        border-left: 3px solid #3b82f6;
-      }
-      .vlc-button-container {
-        position: absolute;
-        bottom: 12px;
-        right: 12px;
-        z-index: 10;
-      }
-      .vlc-button {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 8px 12px;
-        background: rgba(0,0,0,0.7);
-        color: #fff;
-        border: 1px solid #444;
-        border-radius: 6px;
-        font-size: 13px;
-        font-family: inherit;
-        cursor: pointer;
-        transition: all 0.2s;
-        backdrop-filter: blur(4px);
-      }
-      .vlc-button:hover {
-        background: rgba(0,0,0,0.9);
-        border-color: #666;
-      }
-      .vlc-button:active {
-        background: rgba(0,0,0,1);
-      }
-      .vlc-button svg {
-        width: 16px;
-        height: 16px;
-        fill: currentColor;
-      }
-    `;
-    document.head.appendChild(style);
-  }
-  
-  return toast;
-}
 
 function bind(container) {
   container.querySelector('[data-retry-server]')?.addEventListener('click', () => {

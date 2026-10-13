@@ -8,6 +8,13 @@ requests work through the browser player.
 
 On top of search and playback the web app is a full tracking client:
 
+- **Open in VLC** — every title page and the player page have an "Open in VLC"
+  button next to Play. The Rust engine resolves the selected release and starts
+  VLC / mpv / IINA on the same machine with a loopback media URL, which is what
+  makes H.265/HEVC, `.mkv` and DASH releases playable even when the browser
+  cannot decode them. When the deployment has no local player (a hosted server),
+  the button copies the link and shows paste-into-VLC instructions instead.
+
 - **Home carousels** — Continue Watching, Trending Now, Top Rated, Fresh & Highly
   Rated, Most Watched, plus a personalised "Because you watch" row.
 - **Official ratings** — IMDb scores come from the catalog metrics and
@@ -89,6 +96,14 @@ Catalog and playback:
 - `GET /api/streams?provider=moviebox&id=...&season=0&episode=0`
 - `POST /api/play` with `{ "stream_set_id": "…", "release_index": 0 }`
 - `GET /api/media/{session}/{scheme}/{host}/{path}` — short-lived, same-origin media proxy
+- `GET /api/player` — which local players (VLC, mpv, IINA, Android) this machine
+  can launch, plus the reason when it cannot launch any
+- `POST /api/player/open` with `{ "stream_set_id": "…", "release_index": 0,
+  "player": "vlc", "resume_seconds": 754 }` — "Open in VLC": resolves the
+  release and starts the player **on the machine running the API** on a loopback
+  media URL, so provider headers never leave the server. Answers `409` with
+  `{ available: false, players: [] }` when no player can be launched; the UI then
+  copies the playback link for manual playback instead.
 
 Library (watchlist, progress, ratings):
 

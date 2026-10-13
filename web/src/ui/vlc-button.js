@@ -1,10 +1,18 @@
-// VLC button component for opening streams in external VLC player
-// Provides a button that copies the current playback URL for use in VLC/MPV
+// "Open in VLC" handoff for external players.
+//
+// The Rust engine runs next to the browser, so it can start VLC / mpv / IINA
+// with a loopback media URL — provider headers and cookies stay server-side,
+// and the player decodes what the browser cannot (H.265/HEVC, `.mkv`, DASH).
+// When this deployment has no local player (a hosted server, demo mode, or a
+// browser profile that blocks the request), the same button degrades to
+// copying the resolved link with paste-into-VLC instructions.
 
-import { displayUiText } from '../lib/format.js';
+import * as api from '../lib/api.js';
+import { displayUiText, providerLabel } from '../lib/format.js';
 
 let currentPlaybackUrl = null;
 let currentReleaseInfo = null;
+let supportPromise = null;
 
 /**
  * Store the current playback URL and release info
@@ -16,7 +24,7 @@ export function setCurrentPlayback(playback, release, provider, mirrorIndex = 0)
     currentReleaseInfo = null;
     return;
   }
-  
+
   currentPlaybackUrl = playback.playback_url || playback.url;
   currentReleaseInfo = {
     release: release || {},
@@ -58,6 +66,43 @@ export function hasPlaybackUrl() {
   return currentPlaybackUrl !== null;
 }
 
+/** Absolute, same-origin URL for a playback payload (routes are relative). */
+export function absolutePlaybackUrl(playback, origin) {
+  const raw = playback?.playback_url || playback?.url || '';
+  if (!raw) return '';
+  const base = origin || (typeof window !== 'undefined' ? window.location.origin : '');
+  try {
+    const url = new URL(raw, base || undefined);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
+  } catch {
+    return '';
+  }
+}
+
+/** Clipboard write with the legacy fallback used elsewhere in this module. */
+export async function writeClipboard(text) {
+  if (!text) return false;
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    /* Private browsing or a denied permission: fall through. */
+  }
+  try {
+    const input = document.createElement('input');
+    input.value = text;
+    input.style.position = 'fixed';
+    input.style.opacity = '0';
+    document.body.appendChild(input);
+    input.select();
+    const copied = document.execCommand?.('copy') ?? false;
+    document.body.removeChild(input);
+    return copied;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Copy the current playback URL to clipboard
  * Returns true if successful, false otherwise
@@ -66,100 +111,195 @@ export async function copyPlaybackUrl() {
   if (!currentPlaybackUrl) {
     return false;
   }
-  
-  try {
-    await navigator.clipboard.writeText(currentPlaybackUrl);
-    return true;
-  } catch (error) {
-    console.error('Failed to copy URL:', error);
-    return false;
-  }
+
+  const link = absolutePlaybackUrl({ playback_url: currentPlaybackUrl });
+  return writeClipboard(link || currentPlaybackUrl);
 }
 
 /**
- * Create a VLC button element
+ * Which external players the engine can launch here (cached per page load).
+ * A missing route (older engine) or an unreachable engine resolves to
+ * `available: false`, which sends the button down the copy-link path.
+ */
+export async function loadPlayerSupport({ refresh = false } = {}) {
+  if (refresh || !supportPromise) {
+    supportPromise = api.playerSupport().then(
+      (payload) => ({
+        available: Boolean(payload?.available) && (payload?.players?.length || 0) > 0,
+        players: payload?.players || [],
+        default: payload?.default || '',
+        reason: String(payload?.reason || ''),
+      }),
+      (error) => ({
+        available: false,
+        players: [],
+        default: '',
+        reason:
+          error?.status === 404
+            ? 'This engine build cannot open external players.'
+            : 'The engine could not be reached.',
+      }),
+    );
+  }
+  return supportPromise;
+}
+
+/** Forgets the cached support payload (tests and post-settings refreshes). */
+export function clearPlayerSupportCache() {
+  supportPromise = null;
+}
+
+/** Button text for the player the engine would launch: "Open in VLC". */
+export function playerButtonLabel(support) {
+  const players = support?.players || [];
+  const preferred = players.find((player) => player.id === support?.default) || players[0];
+  return `Open in ${preferred?.label || 'VLC'}`;
+}
+
+/** True when the engine answered that no local player can be launched here. */
+export function isPlayerUnavailable(error) {
+  return error?.status === 404 || error?.status === 405 || error?.payload?.available === false;
+}
+
+/**
+ * Copies the link for the selected release so it can be pasted into VLC.
+ * Resolves a fresh playback session when one is not cached yet.
+ */
+export async function copyStreamLink({
+  streamSetId = '',
+  releaseIndex = 0,
+  mirrorIndex = 0,
+} = {}) {
+  let link = '';
+  if (streamSetId) {
+    try {
+      const playback = await api.play({ streamSetId, releaseIndex, mirrorIndex });
+      link = absolutePlaybackUrl(playback);
+    } catch {
+      link = '';
+    }
+  }
+  if (!link && currentPlaybackUrl) link = absolutePlaybackUrl({ playback_url: currentPlaybackUrl });
+  if (!link) return '';
+  return (await writeClipboard(link)) ? link : '';
+}
+
+/**
+ * "Open in VLC" for one release: asks the engine to launch a local player and
+ * falls back to copying the link when this deployment cannot launch one.
+ * @returns {Promise<{opened: boolean, label?: string, url?: string, copied?: boolean, reason?: string, error?: string}>}
+ */
+export async function openStreamExternally(target = {}) {
+  const {
+    streamSetId = '',
+    releaseIndex = 0,
+    mirrorIndex = 0,
+    player = '',
+    resumeSeconds = 0,
+  } = target || {};
+  if (!streamSetId || releaseIndex < 0) {
+    return { opened: false, error: 'Playback links are still loading. Try again in a moment.' };
+  }
+
+  const support = await loadPlayerSupport();
+  if (support.available) {
+    try {
+      const result = await api.openInPlayer({
+        streamSetId,
+        releaseIndex,
+        mirrorIndex,
+        player,
+        resumeSeconds,
+      });
+      return { opened: true, label: result?.label || playerButtonLabel(support), url: result?.url || '' };
+    } catch (error) {
+      if (!isPlayerUnavailable(error)) {
+        return { opened: false, error: error?.message || 'Could not open the media player.' };
+      }
+      // No launchable player after all: copy the link instead.
+    }
+  }
+
+  const link = await copyStreamLink({ streamSetId, releaseIndex, mirrorIndex });
+  return link
+    ? { opened: false, copied: true, link, reason: support.reason }
+    : {
+        opened: false,
+        copied: false,
+        reason: support.reason,
+        error: 'No player on this computer and the link could not be copied.',
+      };
+}
+
+/** Toast copy for an `openStreamExternally()` result. Pure. */
+export function describeOpenResult(result) {
+  if (result?.opened) {
+    return {
+      kind: 'success',
+      message: `${result.label || 'VLC'} is opening on this computer.`,
+    };
+  }
+  if (result?.copied) {
+    return {
+      kind: 'info',
+      message:
+        'No local player found. Link copied — in VLC: Media → Open Network Stream → paste.',
+    };
+  }
+  return { kind: 'error', message: result?.error || 'Could not open a local player.' };
+}
+
+/**
+ * Create a button that hands the current/selected stream to a local player.
  * @param {Object} options - Button options
- * @param {string} options.text - Button text (default: 'Open in VLC')
+ * @param {string} options.text - Fixed label; by default the detected player names itself
  * @param {string} options.className - Additional CSS classes
- * @param {function} options.onClick - Custom click handler
+ * @param {object|function} options.target - `{streamSetId, releaseIndex, mirrorIndex, resumeSeconds}`
+ * @param {function} options.onClick - Custom click handler (skips the default flow)
+ * @param {function} options.onResult - Receives the `openStreamExternally()` result
  * @returns {HTMLElement} The button element
  */
 export function createVlcButton(options = {}) {
-  const text = options.text || 'Open in VLC';
-  const className = options.className || '';
-  
   const button = document.createElement('button');
   button.type = 'button';
-  button.className = `vlc-button ${className}`.trim();
-  button.innerHTML = `
-    <svg class="vlc-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 2L2 7v10c0 5.55 3.84 9.74 9 11 5.16-1.26 9-5.45 9-11V7l-10-5z"/>
-      <path d="M10 17l5-5-5-5v10z" fill="currentColor"/>
-    </svg>
-    <span>${text}</span>
-  `;
-  
+  button.className = `vlc-button ${options.className || ''}`.trim();
+  const icon = document.createElement('span');
+  icon.className = 'vlc-button-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = '▶';
+  const label = document.createElement('span');
+  label.textContent = options.text || 'Open in VLC';
+  button.append(icon, label);
+  button.title = 'Play this stream in VLC, mpv or IINA on this computer.';
+
+  if (!options.text) {
+    loadPlayerSupport().then((support) => {
+      if (support.available) label.textContent = playerButtonLabel(support);
+    });
+  }
+
   button.addEventListener('click', async () => {
     if (options.onClick) {
-      options.onClick();
+      await options.onClick(button);
       return;
     }
-    
-    await handleVlcButtonClick(button);
-  });
-  
-  return button;
-}
-
-/**
- * Handle VLC button click
- * Copies the URL and shows feedback
- */
-export async function handleVlcButtonClick(button) {
-  if (!hasPlaybackUrl()) {
-    showVlcToast('No playback URL available. Start a stream first.', 'error');
-    return false;
-  }
-  
-  const copied = await copyPlaybackUrl();
-  
-  if (copied) {
-    showVlcToast('URL copied! Open VLC → Media → Open Network Stream → Paste → Play', 'success');
-    
-    // Update button text temporarily
-    const originalText = button.querySelector('span').textContent;
-    button.querySelector('span').textContent = 'Copied!';
-    
-    setTimeout(() => {
-      button.querySelector('span').textContent = originalText;
-    }, 2000);
-    
-    return true;
-  } else {
-    // Fallback: Select the URL for manual copying
-    const url = getCurrentPlaybackUrl();
-    const releaseInfo = getCurrentReleaseInfo();
-    
-    // Create a temporary input for selection
-    const tempInput = document.createElement('input');
-    tempInput.value = url;
-    tempInput.style.position = 'fixed';
-    tempInput.style.opacity = '0';
-    tempInput.style.pointerEvents = 'none';
-    document.body.appendChild(tempInput);
-    tempInput.select();
-    
+    const original = label.textContent;
+    button.disabled = true;
+    label.textContent = 'Opening…';
+    let result;
     try {
-      document.execCommand('copy');
-      showVlcToast('URL selected! Press Ctrl+C to copy, then open in VLC', 'info');
-    } catch {
-      showVlcToast('Could not copy. URL: ' + url.substring(0, 50) + '...', 'error');
+      const target = typeof options.target === 'function' ? await options.target() : options.target;
+      result = await openStreamExternally(target || {});
     } finally {
-      document.body.removeChild(tempInput);
+      button.disabled = false;
+      label.textContent = original;
     }
-    
-    return false;
-  }
+    const summary = describeOpenResult(result);
+    if (options.onResult) options.onResult(result);
+    else showVlcToast(summary.message, summary.kind);
+  });
+
+  return button;
 }
 
 /**
@@ -167,16 +307,16 @@ export async function handleVlcButtonClick(button) {
  */
 export function showVlcToast(message, type = 'info') {
   const toast = document.getElementById('vlc-toast') || createToastContainer();
-  
+
   // Clear existing timeout
   if (toast._timeout) {
     clearTimeout(toast._timeout);
   }
-  
+
   toast.textContent = message;
   toast.className = `vlc-toast vlc-toast-${type}`;
   toast.hidden = false;
-  
+
   // Auto-hide after 5 seconds
   toast._timeout = setTimeout(() => {
     toast.hidden = true;
@@ -194,9 +334,9 @@ function createToastContainer() {
   toast.hidden = true;
   toast.role = 'status';
   toast.ariaLive = 'polite';
-  
+
   document.body.appendChild(toast);
-  
+
   // Add CSS if not already present
   if (!document.getElementById('vlc-toast-css')) {
     const style = document.createElement('style');
@@ -253,10 +393,13 @@ function createToastContainer() {
       .vlc-button:active {
         background: #4a4a4a;
       }
-      .vlc-button .vlc-icon {
-        width: 16px;
-        height: 16px;
-        fill: currentColor;
+      .vlc-button:disabled {
+        opacity: 0.7;
+        cursor: progress;
+      }
+      .vlc-button .vlc-button-icon {
+        font-size: 11px;
+        color: #ff8a69;
       }
       .vlc-button small {
         display: block;
@@ -267,45 +410,31 @@ function createToastContainer() {
     `;
     document.head.appendChild(style);
   }
-  
+
   return toast;
 }
 
 /**
- * Create a VLC button with additional info
- * Shows codec and quality information
- */
-export function createVlcButtonWithInfo(options = {}) {
-  const button = createVlcButton(options);
-  
-  // Add tooltip with instructions
-  button.title = 'Copy link and open in VLC/MPV. Browser cannot play H.265/HEVC.';
-  
-  return button;
-}
-
-/**
- * Get VLC instructions based on the current release info
+ * Release summary used by the instructions below and by the player page.
  */
 export function getVlcInstructions() {
   const info = getCurrentReleaseInfo();
-  
+
   if (!info) {
-    return 'Start a stream first, then click "Open in VLC" to copy the URL.';
+    return 'Start a stream first, then click "Open in VLC" to open it in a local player.';
   }
-  
+
   const lines = [
-    `Stream: ${info.filename}`,
+    `Stream: ${displayUiText(info.filename)}`,
     `Quality: ${info.quality}`,
     `Codec: ${info.codec || 'Unknown'}`,
     `Type: ${info.streamType.toUpperCase()}`,
+    `Source: ${providerLabel(info.provider)}`,
     '',
-    'To play in VLC:',
-    '1. Click "Open in VLC" to copy the URL',
-    '2. Open VLC Media Player',
-    '3. Media → Open Network Stream',
-    '4. Paste the URL and click Play',
+    'Click "Open in VLC" to start the player here.',
+    'If no player is installed, the link is copied instead:',
+    'VLC → Media → Open Network Stream → paste → Play.',
   ];
-  
+
   return lines.join('\n');
 }

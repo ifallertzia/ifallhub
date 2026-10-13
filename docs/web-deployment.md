@@ -62,6 +62,8 @@ All configuration is environment-only. Secrets belong in the Render dashboard
 | `MOVIEBOX_WEB_MEDIA_RATE_LIMIT` | `1200` | Edge rate limit for `/api/media/*` segments (`0` disables). A long DASH movie makes many segment requests, so keep this generous. |
 | `MOVIEBOX_DATA_DIR` | platform default | Data directory. The web library (watchlist, resume progress, personal ratings) is stored here as `web_library.json`. Mount a volume to keep it across deploys. |
 | `MOVIEBOX_API_ADDR` | `127.0.0.1:8787` | Loopback address of the spawned Rust API. |
+| `MOVIEBOX_WEB_LOCAL_PLAYER` | auto | `0` disables the "Open in VLC" handoff. By default the API can launch a detected VLC/mpv/IINA when it inherits a graphical session; a hosted container has neither, so the button copies the link instead. |
+| `MOVIEBOX_WEB_PLAYER_BASE` | bind address | Base URL the launched player uses to reach `/api/media/*`. Wildcard binds become `http://127.0.0.1:<port>`; set this when the player runs on another device. |
 | `MOVIEBOX_WEB_ROOT` | `web/dist` | Static asset root inside the container. |
 | `MOVIEBOX_LOG` | `info` | Rust log level (`off`…`trace`). |
 | `MOVIEBOX_FOURKHDHUB_URL` | unset | Custom 4KHDHub base URL (same as the TUI). |
@@ -75,6 +77,16 @@ and devices. `GET /api/library/events` pushes every change to connected clients.
 browser authenticates the event stream with the `moviebox_key` cookie (the API
 already accepts that cookie form); without it the client falls back to polling
 `/api/library` every 8 seconds.
+
+### Open in VLC
+
+`GET /api/player` reports whether this API can start a media player, and
+`POST /api/player/open` starts one with a loopback `/api/media/*` URL for the
+selected release (provider headers stay server-side). The player runs on the
+machine that hosts the API, so a public deployment answers
+`{ "available": false }` and the web UI falls back to copying the link. Launching
+a player also needs the `MOVIEBOX_WEB_API_TOKEN` like any other JSON route; keep
+that in mind if you expose the API to untrusted clients.
 
 ### Access protection
 

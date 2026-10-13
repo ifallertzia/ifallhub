@@ -386,6 +386,26 @@ h1, h2, h3, p { margin: 0; }
 .stream-check { color: var(--accent-light); }
 .stream-downloads { display: flex; flex-wrap: wrap; gap: 7px; }
 .stream-note { margin-top: 12px; color: var(--dim); font-size: 11px; }
+.stream-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+
+/* "Open in VLC": hands the stream to a local player (VLC, mpv, IINA). */
+.vlc-launch { border-color: rgba(255, 92, 70, 0.35); }
+.vlc-launch:hover { border-color: var(--accent); color: var(--accent-light); }
+.vlc-button-container { position: absolute; bottom: 12px; right: 12px; z-index: 10; }
+.vlc-button-container .vlc-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  border: 1px solid #444;
+  border-radius: 6px;
+  font-size: 13px;
+  backdrop-filter: blur(4px);
+}
+.vlc-button-container .vlc-button:hover { background: rgba(0, 0, 0, 0.9); border-color: #666; }
+.vlc-button-container .vlc-button .vlc-button-icon { font-size: 11px; color: var(--accent-light); }
 
 /* ----------------------------------------------------------------- watch */
 .watch { padding-top: 18px; }

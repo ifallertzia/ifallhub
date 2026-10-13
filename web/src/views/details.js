@@ -17,6 +17,12 @@ import { rankRelated, similarByMeta } from '../lib/recommend.js';
 import { app, cardMeta, ensureMeta, rememberGenres, toast } from '../state.js';
 import { navigate, watchPath } from '../lib/router.js';
 import { buildStreamEntry, downloadRelease } from '../player/engine.js';
+import {
+  describeOpenResult,
+  loadPlayerSupport,
+  openStreamExternally,
+  playerButtonLabel,
+} from '../ui/vlc-button.js';
 
 const state = {
   provider: 'moviebox',
@@ -26,6 +32,7 @@ const state = {
   episode: 0,
   entry: null,
   request: 0,
+  streamsPromise: null,
 };
 
 export async function renderDetails(container, route) {
@@ -34,6 +41,7 @@ export async function renderDetails(container, route) {
   state.id = route.params.id;
   state.details = null;
   state.entry = null;
+  state.streamsPromise = null;
 
   container.innerHTML = `<div class="page-shell">${spinnerHtml('Loading title…')}</div>`;
 
@@ -118,6 +126,7 @@ function paint(container) {
             </div>
             <div class="detail-actions">
               <button class="primary-button" type="button" data-play-title>▶ ${progress && progress.position_seconds > 5 ? 'Resume' : 'Play'}</button>
+              <button class="ghost-button vlc-launch" type="button" data-open-vlc title="Play on this computer in VLC, mpv or IINA (H.265/.mkv ke liye)">▶ Open in VLC</button>
               <button class="ghost-button" type="button" data-watchlist="${listed ? '1' : '0'}">${listed ? '✓ In My List' : '+ My List'}</button>
               <button class="ghost-button" type="button" data-rate-toggle>★ Rate</button>
             </div>
@@ -179,7 +188,10 @@ function paint(container) {
             <h2>Available streams</h2>
             <p class="muted" id="stream-subtitle">Checking configured sources…</p>
           </div>
-          <button class="primary-button" type="button" data-play-title>▶ Play automatically</button>
+          <div class="stream-actions">
+            <button class="primary-button" type="button" data-play-title>▶ Play automatically</button>
+            <button class="ghost-button vlc-launch" type="button" data-open-vlc title="Play on this computer in VLC, mpv or IINA (H.265/.mkv ke liye)">▶ Open in VLC</button>
+          </div>
         </header>
         <div class="stream-list" id="stream-list">${spinnerHtml('Finding streams…')}</div>
         <p class="stream-note">Play automatically tries Sakshi → Ritu → Siddharth → the rest. Har link ka apna download button hai.</p>
@@ -199,6 +211,11 @@ function bind(container) {
       navigate(watchPath(state.provider, state.id, { season: state.season, episode: state.episode }));
     });
   });
+
+  container.querySelectorAll('[data-open-vlc]').forEach((button) => {
+    button.addEventListener('click', () => openInLocalPlayer(button));
+  });
+  applyPlayerLabel(container);
 
   const watchlistButton = container.querySelector('[data-watchlist]');
   watchlistButton?.addEventListener('click', async () => {
@@ -267,11 +284,67 @@ function bind(container) {
   });
 }
 
+/**
+ * Names the "Open in VLC" buttons after the player this engine can actually
+ * launch (VLC/mpv/IINA/Android). Left as-is when this deployment cannot launch
+ * one: the click then copies the link instead.
+ */
+async function applyPlayerLabel(container) {
+  const support = await loadPlayerSupport();
+  if (!support.available) return;
+  const label = playerButtonLabel(support);
+  container.querySelectorAll('.vlc-launch').forEach((button) => {
+    if (button.dataset.release === undefined) button.textContent = `▶ ${label}`;
+  });
+}
+
+/**
+ * Opens the selected release (newest list state) in a local player. Waits for
+ * the stream list when a load is still in flight, so the button works while
+ * the page is still collecting links.
+ */
+async function openInLocalPlayer(button) {
+  const previous = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Opening…';
+  try {
+    await state.streamsPromise?.catch(() => {});
+    const entry = state.entry;
+    if (!entry?.streamSetId || !entry.releases.length) {
+      toast('Stream links are still loading. Try again in a moment.', 'info');
+      return;
+    }
+    const index = Number(button.dataset.release ?? 0);
+    const release = entry.releases[Number.isFinite(index) ? index : 0];
+    if (!release) {
+      toast('That link is no longer in the stream list. Refresh and try again.', 'info');
+      return;
+    }
+    const progress = library.progressFor(state.provider, state.id);
+    const result = await openStreamExternally({
+      streamSetId: entry.streamSetId,
+      releaseIndex: release.serverIndex ?? 0,
+      mirrorIndex: 0,
+      resumeSeconds: button.dataset.release === undefined ? progress?.position_seconds || 0 : 0,
+    });
+    const summary = describeOpenResult(result);
+    toast(summary.message, summary.kind);
+  } finally {
+    button.disabled = false;
+    button.textContent = previous;
+  }
+}
+
 async function loadStreams() {
   const list = document.querySelector('#stream-list');
   const subtitle = document.querySelector('#stream-subtitle');
   if (!list) return;
   list.innerHTML = spinnerHtml('Finding streams…');
+  state.streamsPromise = resolveStreams(list, subtitle);
+  return state.streamsPromise;
+}
+
+async function resolveStreams(list, subtitle) {
   try {
     const response = await api.streams({
       provider: state.provider,
@@ -294,6 +367,9 @@ async function loadStreams() {
       button.addEventListener('click', () => {
         navigate(watchPath(state.provider, state.id, { season: state.season, episode: state.episode }));
       });
+    });
+    list.querySelectorAll('[data-open-vlc]').forEach((button) => {
+      button.addEventListener('click', () => openInLocalPlayer(button));
     });
     list.querySelectorAll('[data-download]').forEach((button) => {
       button.addEventListener('click', async () => {
@@ -332,6 +408,7 @@ function streamRowHtml(release, index) {
         <span class="stream-source">${escapeHtml(providerLabel(release.provider))}</span>
       </button>
       <div class="stream-downloads">
+        <button class="ghost-button small vlc-launch" type="button" data-open-vlc data-release="${index}" title="Play this exact link in VLC, mpv or IINA">▶ VLC</button>
         ${mirrors
           .map(
             (mirror, mirrorIndex) => `

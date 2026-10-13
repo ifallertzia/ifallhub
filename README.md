@@ -134,6 +134,8 @@ MOVIEBOX_API_URL=http://127.0.0.1:8787 npm run dev
 
 Running `npm run dev` without the API URL shows a labelled demo preview instead of making provider requests. See [`web/README.md`](web/README.md) for Windows instructions, build steps, and API details.
 
+Every title page and the player page also have an **Open in VLC** button next to Play: the same Rust API starts VLC / mpv / IINA on the machine it runs on with a loopback media URL, so H.265/HEVC, `.mkv` and DASH releases play in a player that decodes them (provider headers never reach the browser). If no local player is installed — or the UI is hosted on a remote server — the button copies the link with paste-into-VLC instructions instead.
+
 ### Deploying the web player
 
 For a fully working public deployment, use the repository's **Docker-based Render Web Service** (`render.yaml` + root `Dockerfile`), which serves the built frontend and proxies `/api/*` to the headless Rust API on one origin — do **not** deploy `web/dist` as a Static Site, because the production build has no API of its own. The image keeps the Rust API on loopback, never launches the TUI, streams media without buffering, and supports access-key protection and rate limits. See [`docs/web-deployment.md`](docs/web-deployment.md).
