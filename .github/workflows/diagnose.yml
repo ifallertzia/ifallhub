@@ -1,0 +1,62 @@
+name: Diagnose
+
+# Temporary: republishes cargo fmt / clippy / nextest output as check-run
+# annotations so the sandbox (which cannot download job logs) can read it.
+# Delete this file once the CI failures are fixed.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  diagnose:
+    name: Diagnose
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "diagnose"
+      - name: Formatting report
+        run: |
+          set +e
+          cargo fmt --check > /tmp/fmt.log 2>&1
+          echo "fmt exit: $?"
+          i=0
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            i=$((i + 1))
+            [ "$i" -gt 40 ] && break
+            printf '::error title=fmt %02d::%s\n' "$i" "$(printf '%s' "$line" | tr -d '\r')"
+          done < /tmp/fmt.log
+      - name: Clippy report
+        run: |
+          set +e
+          cargo clippy --all-targets --all-features --locked -- -D warnings > /tmp/clippy.log 2>&1
+          echo "clippy exit: $?"
+          head -n 120 /tmp/clippy.log > /tmp/clippy-head.log
+          i=0
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            i=$((i + 1))
+            [ "$i" -gt 45 ] && break
+            printf '::error title=clippy %02d::%s\n' "$i" "$(printf '%s' "$line" | tr -d '\r')"
+          done < /tmp/clippy-head.log
+      - name: Test report
+        run: |
+          set +e
+          cargo nextest run --all-features --locked --no-fail-fast > /tmp/test.log 2>&1
+          echo "nextest exit: $?"
+          grep -nE "FAIL|panicked|assertion|left:|right:|Summary" /tmp/test.log | head -n 60 > /tmp/test-filtered.log
+          i=0
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            i=$((i + 1))
+            [ "$i" -gt 45 ] && break
+            printf '::error title=test %02d::%s\n' "$i" "$(printf '%s' "$line" | tr -d '\r')"
+          done < /tmp/test-filtered.log
