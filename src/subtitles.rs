@@ -763,7 +763,9 @@ fn decode_zip(bytes: &[u8]) -> Result<String, String> {
             continue;
         }
         let name = entry.name().to_ascii_lowercase();
-        let is_subtitle = [".srt", ".vtt", ".ass", ".ssa", ".sub", ".txt"]
+        // Archives often carry a readme next to the caption, so only real
+        // subtitle extensions win outright; anything else is a fallback.
+        let is_subtitle = [".srt", ".vtt", ".ass", ".ssa", ".sub"]
             .iter()
             .any(|extension| name.ends_with(extension));
         let mut contents = Vec::new();
