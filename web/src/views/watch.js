@@ -3,6 +3,7 @@
 
 import * as api from '../lib/api.js';
 import * as library from '../lib/library.js';
+import { appendPlaybackLink } from '../ui/playback-links.js';
 import { cardHtml, rowHtml, spinnerHtml } from '../ui/components.js';
 import {
   SERVER_ROTATION,
@@ -109,6 +110,14 @@ export async function renderWatch(container, route) {
         <p class="watch-status" id="watch-status" role="status" aria-live="polite">Finding a working link…</p>
         <div class="server-rotation" id="server-rotation" aria-label="Server order"></div>
       </div>
+
+      <section class="playback-links" aria-labelledby="playback-links-title">
+        <h3 id="playback-links-title">Playback links tried</h3>
+        <p class="muted">Player jin links ko try karta hai, woh yahan dikhenge. These session links expire; DASH/HLS links are manifests, not single video files.</p>
+        <div id="watch-playback-links">
+          <p class="muted" data-links-empty>No playback links resolved yet.</p>
+        </div>
+      </section>
 
       <section class="watch-controls">
         <div class="watch-title-block">
@@ -540,6 +549,9 @@ async function startRotation({ startAfter, startRelease = 0 } = {}) {
         paintStreams();
         state.playerControls?.refresh();
       },
+      onPlayback: (attempt) => {
+        if (runId === state.runId && !controller.signal.aborted) showPlaybackLink(attempt);
+      },
       onTrack: handlePlayerReady,
       onPlaying: ({ provider, release }) => {
         state.quality = String(release.quality || 'AUTO').toUpperCase();
@@ -586,6 +598,8 @@ async function playManual(releaseIndex) {
         { streamSetId: state.entry.streamSetId, releaseIndex: target.serverIndex ?? attempt.releaseIndex, mirrorIndex: attempt.mirrorIndex },
         { signal: controller.signal },
       );
+      if (controller.signal.aborted || runId !== state.runId) return;
+      showPlaybackLink({ playback, release: target, provider: state.entry.provider, mirrorIndex: attempt.mirrorIndex });
       const result = await openStream({
         playback,
         video,
@@ -721,6 +735,10 @@ function paintRotation() {
         </span>${arrow}`;
     })
     .join('');
+}
+
+function showPlaybackLink(attempt) {
+  appendPlaybackLink(document.querySelector('#watch-playback-links'), attempt, window.location.origin);
 }
 
 function paintStreams() {
