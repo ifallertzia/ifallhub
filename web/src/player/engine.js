@@ -4,6 +4,9 @@
 
 import * as api from '../lib/api.js';
 import { SERVER_ROTATION, displayUiText, itemId, itemProvider, providerLabel } from '../lib/format.js';
+import { pickBestMatch, prepareSearchQuery } from './title-match.js';
+
+export { pickBestMatch } from './title-match.js';
 
 export const STREAM_START_TIMEOUT_MS = 6500;
 const STABLE_PLAYBACK_MS = 1200;
@@ -210,9 +213,9 @@ export function buildAttempts(releases = [], firstIndex = 0) {
 }
 
 /** Drops the cached stream list for one server (its links/session expired). */
-export async function refreshServerStreams({ provider, item, title, season, episode, isSeries, cache, signal }) {
+export async function refreshServerStreams({ provider, item, title, year, season, episode, isSeries, cache, signal }) {
   delete cache[provider];
-  return resolveServerStreams({ provider, item, title, season, episode, isSeries, cache, signal });
+  return resolveServerStreams({ provider, item, title, year, season, episode, isSeries, cache, signal });
 }
 
 /** Servers to try after `provider`, wrapping so every server still gets a turn. */
@@ -222,29 +225,35 @@ export function rotationAfter(provider) {
   return [...SERVER_ROTATION.slice(index + 1), ...SERVER_ROTATION.slice(0, index + 1)];
 }
 
-export function pickBestMatch(results = [], title = '') {
-  const lower = String(title || '').toLowerCase();
-  const exact = results.find((entry) => entry.title?.toLowerCase() === lower);
-  if (exact) return exact;
-  const partial = results.find(
-    (entry) => entry.title?.toLowerCase().includes(lower) || lower.includes(entry.title?.toLowerCase()),
-  );
-  return partial || results[0];
-}
-
 /** Finds this title on one server and returns its stream set (or null). */
-export async function resolveServerStreams({ provider, item, title, season, episode, isSeries, cache, signal }) {
+export async function resolveServerStreams({ provider, item, title, year, season, episode, isSeries, cache, signal }) {
   if (cache[provider]?.releases?.length) return cache[provider];
+  const expectedTitle = String(title || item?.title || '').trim();
+  const expectedYear = String(year || item?.year || item?.release_year || '').trim();
+  if (!expectedTitle) return null;
+
   try {
     let target = item && itemProvider(item) === provider ? item : null;
     if (!target) {
-      if (!title) return null;
-      const results = await api.search({ q: title, provider, page: 1 }, { signal });
+      const query = prepareSearchQuery(expectedTitle, expectedYear);
+      if (!query) return null;
+      const results = await api.search({ q: query, provider, page: 1 }, { signal });
       if (!Array.isArray(results) || !results.length) return null;
-      target = pickBestMatch(results, title);
+      // A loose search result is a no-match. Never substitute the first item:
+      // that was allowing a shared sequel number to open an unrelated film.
+      target = pickBestMatch(results, expectedTitle, expectedYear, isSeries);
+      if (!target) return null;
     }
     const response = await api.streams(
-      { provider, id: itemId(target), season, episode, isSeries },
+      {
+        provider,
+        id: itemId(target),
+        season,
+        episode,
+        isSeries,
+        expectedTitle,
+        expectedYear,
+      },
       { signal },
     );
     const entry = buildStreamEntry(provider, target, response);
@@ -453,7 +462,7 @@ export async function openStream({ playback, video, signal, onTrack }) {
  * Walks the server rotation, then every release/mirror on each server, until a
  * stream starts. `hooks` receives UI updates; `signal` cancels the whole run.
  */
-export async function autoPlay({ item, title, order, season, episode, isSeries, cache, startRelease = 0, video, signal, hooks }) {
+export async function autoPlay({ item, title, year, order, season, episode, isSeries, cache, startRelease = 0, video, signal, hooks }) {
   const setStatus = hooks.onStatus || (() => {});
   const setServerStatus = hooks.onServerStatus || (() => {});
   const setHeader = hooks.onHeader || (() => {});
@@ -467,7 +476,7 @@ export async function autoPlay({ item, title, order, season, episode, isSeries, 
     setServerStatus(provider, 'loading');
     setStatus(`Checking ${providerLabel(provider)} for “${title}”…`, true);
 
-    let entry = await resolveServerStreams({ provider, item, title, season, episode, isSeries, cache, signal });
+    let entry = await resolveServerStreams({ provider, item, title, year, season, episode, isSeries, cache, signal });
     if (signal.aborted) return { cancelled: true };
     if (!entry) {
       setServerStatus(provider, 'empty');
@@ -535,7 +544,7 @@ export async function autoPlay({ item, title, order, season, episode, isSeries, 
       if (!refreshed && isExpiredLinkError(failure)) {
         refreshed = true;
         setStatus(`${sourceName} links expired — getting fresh links…`, true);
-        const fresh = await refreshServerStreams({ provider, item, title, season, episode, isSeries, cache, signal });
+        const fresh = await refreshServerStreams({ provider, item, title, year, season, episode, isSeries, cache, signal });
         if (signal.aborted) return { cancelled: true };
         if (fresh) {
           entry = fresh;

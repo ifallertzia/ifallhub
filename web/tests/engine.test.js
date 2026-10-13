@@ -9,11 +9,14 @@ import {
   describeShakaError,
   isExpiredLinkError,
   matchReleaseIndex,
+  pickBestMatch,
   rotationAfter,
   scoreRelease,
   sortReleases,
   unsupportedReason,
 } from '../src/player/engine.js';
+import { apiUrl } from '../src/lib/api.js';
+import { prepareSearchQuery, releaseTitleMatches, titlesMatch } from '../src/player/title-match.js';
 
 const hevcRelease = {
   provider: 'moviebox',
@@ -151,6 +154,84 @@ test('matchReleaseIndex keeps the user pick after a refresh', () => {
   assert.equal(matchReleaseIndex(fresh, { filename: 'Inception 1080p h265', quality: '1080p' }), 1);
   assert.equal(matchReleaseIndex(fresh, { filename: 'Gone 480p', quality: '480p' }), 0);
   assert.equal(matchReleaseIndex([], undefined), 0);
+});
+
+test('fallback search sanitizes language suffixes and appends the known year', () => {
+  assert.equal(prepareSearchQuery('Drishyam 2 [Hindi]', '2022'), 'Drishyam 2 2022');
+  assert.equal(prepareSearchQuery('Drishyam 2 (Hindi Dubbed)', '2022'), 'Drishyam 2 2022');
+  assert.equal(prepareSearchQuery('Dune: Part Two (2024)', '2024'), 'Dune: Part Two 2024');
+});
+
+test('search and expected-title API parameters are safely URL-encoded', () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = { location: { origin: 'https://ifallhub.test' } };
+  try {
+    const searchRoute = apiUrl('/api/search', {
+      q: prepareSearchQuery('Drishyam 2 [Hindi]', '2022'),
+      provider: 'fourkhdhub',
+    });
+    const streamsRoute = apiUrl('/api/streams', {
+      provider: 'fourkhdhub',
+      id: '/drishyam-2/',
+      expected_title: 'Drishyam 2 [Hindi]',
+      expected_year: '2022',
+    });
+    const subtitlesRoute = apiUrl('/api/subtitles', {
+      title: 'Dune: Part Two',
+      year: '2024',
+      season: 1,
+      episode: 2,
+    });
+    const subtitleFileRoute = apiUrl('/api/subtitle-file', { set_id: 'abc123', index: 1 });
+    assert.equal(new URL(searchRoute, globalThis.window.location.origin).searchParams.get('q'), 'Drishyam 2 2022');
+    assert.equal(new URL(streamsRoute, globalThis.window.location.origin).searchParams.get('expected_title'), 'Drishyam 2 [Hindi]');
+    assert.equal(new URL(subtitlesRoute, globalThis.window.location.origin).searchParams.get('title'), 'Dune: Part Two');
+    assert.equal(new URL(subtitlesRoute, globalThis.window.location.origin).searchParams.get('episode'), '2');
+    assert.equal(new URL(subtitleFileRoute, globalThis.window.location.origin).searchParams.get('index'), '1');
+    assert.match(streamsRoute, /expected_title=Drishyam\+2\+%5BHindi%5D/u);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test('fallback title selection rejects a shared sequel number and has no first-result fallback', () => {
+  const unrelated = {
+    id: { provider: 'fourkhdhub', value: '/cabin-fever-2/' },
+    title: 'Cabin Fever 2 Spring Fever',
+    media_type: 'movie',
+    year: '2009',
+  };
+  const matching = {
+    id: { provider: 'fourkhdhub', value: '/drishyam-2/' },
+    title: 'Drishyam 2 [Hindi]',
+    media_type: 'movie',
+    year: '2022',
+  };
+
+  assert.equal(pickBestMatch([unrelated], 'Drishyam 2 [Hindi]', '2022', false), null);
+  assert.equal(
+    pickBestMatch([unrelated, matching], 'Drishyam 2 [Hindi]', '2022', false),
+    matching,
+  );
+  assert.equal(titlesMatch('Drishyam 2', 'Cabin Fever 2 Spring Fever', '2022', '2009'), false);
+  assert.equal(titlesMatch('Drishyam 2', 'Drishyam 2 (2022)', '2022', '2022'), true);
+});
+
+test('release filenames are checked before scraper streams are accepted', () => {
+  assert.equal(
+    releaseTitleMatches(
+      'Drishyam 2 [Hindi]',
+      'Cabin.Fever.2.Spring.Fever.2009.1080p.WEB-DL.mkv',
+      '2022',
+    ),
+    false,
+  );
+  assert.equal(
+    releaseTitleMatches('Drishyam 2', 'Drishyam.2.2022.1080p.WEB-DL.H.264.mkv', '2022'),
+    true,
+  );
+  assert.equal(releaseTitleMatches('Drishyam 2', '1080p WEB-DL H.264', '2022'), null);
 });
 
 test('rotationAfter still wraps every server into the order', () => {

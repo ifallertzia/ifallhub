@@ -130,6 +130,10 @@ node deploy/smoke.mjs --base http://127.0.0.1:3000 --token devkey --real
   only sees `/api/media/{session}/...` URLs on the same origin.
 - HLS/DASH manifests are fetched and rewritten so every segment, key, and
   subtitle URI is re-routed through `/api/media/...`.
+- The watch page can also search MovieBox captions by the verified title/year
+  (and season/episode for series). `/api/subtitles` returns language choices;
+  `/api/subtitle-file` fetches the selected caption server-side from trusted
+  MovieBox CDNs, avoiding browser CORS and keeping provider URLs private.
 - Media segments and byte-range (`Range`/`If-Range`) requests are streamed
   through without buffering the video, and `Content-Range`/`Content-Length`
   are forwarded so seeking works.

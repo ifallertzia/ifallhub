@@ -385,6 +385,14 @@ function makeMockApiPlugin(enabled) {
           return json(res, 200, { meta });
         }
 
+        if (path === '/api/subtitles') {
+          return json(res, 200, { subtitle_set_id: null, subtitles: [] });
+        }
+
+        if (path === '/api/subtitle-file') {
+          return json(res, 404, { error: 'Demo mode has no external subtitle files' });
+        }
+
         if (path === '/api/streams') {
           return json(res, 200, {
             stream_set_id: `demo-stream-${item.id.value}`,

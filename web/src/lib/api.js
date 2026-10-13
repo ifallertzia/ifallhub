@@ -151,11 +151,35 @@ export function meta({ provider, ids = [] } = {}, options = {}) {
   return api(apiUrl('/api/meta', { provider, id: ids.join(',') }), options);
 }
 
-export function streams({ provider, id, season = 0, episode = 0, isSeries = false } = {}, options = {}) {
+export function streams({
+  provider,
+  id,
+  season = 0,
+  episode = 0,
+  isSeries = false,
+  expectedTitle = '',
+  expectedYear = '',
+} = {}, options = {}) {
   return api(
-    apiUrl('/api/streams', { provider, id, season, episode, is_series: isSeries ? 'true' : 'false' }),
+    apiUrl('/api/streams', {
+      provider,
+      id,
+      season,
+      episode,
+      is_series: isSeries ? 'true' : 'false',
+      expected_title: expectedTitle,
+      expected_year: expectedYear,
+    }),
     options,
   );
+}
+
+export function subtitles({ title, year = '', season = 0, episode = 0 } = {}, options = {}) {
+  return api(apiUrl('/api/subtitles', { title, year, season, episode }), options);
+}
+
+export function subtitleFile({ setId, index } = {}, options = {}) {
+  return api(apiUrl('/api/subtitle-file', { set_id: setId, index }), options);
 }
 
 export function play({ streamSetId, releaseIndex, mirrorIndex = 0 } = {}, options = {}) {
