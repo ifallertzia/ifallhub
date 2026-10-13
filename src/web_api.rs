@@ -171,10 +171,12 @@ impl CachedSubtitleOption {
         }
     }
 
-    /// Rank used when merging: familiar languages first, then popularity.
-    fn sort_key(&self) -> (u8, std::cmp::Reverse<u64>, u8, String) {
+    /// Rank used when merging: familiar languages first, then the caption that
+    /// belongs to the stream itself, then provider popularity.
+    fn sort_key(&self) -> (u8, u8, std::cmp::Reverse<u64>, u8, String) {
         (
             crate::subtitles::language_priority(&self.language),
+            u8::from(!self.engine),
             std::cmp::Reverse(self.downloads.unwrap_or(0)),
             subtitle_source_priority(&self.source),
             self.name.to_ascii_lowercase(),
