@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   absolutePlaybackUrl,
   clearPlayerSupportCache,
+  copyPlaybackUrlOrResolve,
   copyStreamLink,
   describeOpenResult,
   isPlayerUnavailable,
@@ -212,4 +213,46 @@ test('copyStreamLink resolves and copies the playback URL', async (t) => {
 
   assert.equal(link, `${origin}/api/media/token/https/cdn.test/movie.mkv`);
   assert.equal(written.length, 1);
+});
+
+test('copyPlaybackUrlOrResolve copies the playing link without a new session', async (t) => {
+  const written = [];
+  setup(t, {
+    clipboard: { writeText: async (value) => written.push(value) },
+    fetchImpl: async (url) => {
+      throw new Error(`unexpected call: ${url}`);
+    },
+  });
+
+  const link = await copyPlaybackUrlOrResolve({ url: '/api/media/token/https/cdn.test/movie.mkv?x=1' });
+
+  assert.equal(link, `${origin}/api/media/token/https/cdn.test/movie.mkv?x=1`);
+  assert.deepEqual(written, [link]);
+});
+
+test('copyPlaybackUrlOrResolve falls back to resolving a release', async (t) => {
+  const written = [];
+  const calls = [];
+  setup(t, {
+    clipboard: { writeText: async (value) => written.push(value) },
+    fetchImpl: async (url) => {
+      calls.push(url);
+      return jsonResponse({ playback_url: '/api/media/token/https/cdn.test/movie.mkv' });
+    },
+  });
+
+  const link = await copyPlaybackUrlOrResolve({ url: '', streamSetId: 'set-9', releaseIndex: 4 });
+
+  assert.equal(link, `${origin}/api/media/token/https/cdn.test/movie.mkv`);
+  assert.deepEqual(calls, ['/api/play']);
+  assert.deepEqual(written, [link]);
+});
+
+test('copyPlaybackUrlOrResolve reports nothing when no link resolves', async (t) => {
+  setup(t, {
+    clipboard: { writeText: async () => {} },
+    fetchImpl: async () => jsonResponse({ error: 'stream set expired' }, 410),
+  });
+
+  assert.equal(await copyPlaybackUrlOrResolve({ url: '', streamSetId: 'gone' }), '');
 });

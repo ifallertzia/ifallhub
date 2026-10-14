@@ -245,6 +245,14 @@ ki allow-list me add ho jaate hain.
   per ek baar.
 - **Badge** — stream list me unplayable releases par `⚠ H.265 browser me nahi` /
   `⚠ container browser me nahi` dikhta hai, taaki user aankh band karke click na kare.
+- **"Playback links" panel (player page)** — player ko jo bhi link diya jaata hai (H.265/HEVC
+  `.h265` DASH, `.mkv`, jo bhi) woh player ke neeche list me dikhta hai: provider · quality ·
+  mirror · stream type, poora URL select karne layak field me, har row par **Copy link** aur
+  panel me **Copy all**. Row par `⚠ H.265/HEVC — browser decode nahi kar sakta, mpv/VLC me
+  chalega` note bhi aata hai. Yeh link select karke seedha `mpv`/`vlc` me paste kar sakte ho;
+  page actions me **⧉ Copy link** abhi chal raha link copy karta hai (kuch play na ho to
+  selected release ka link resolve karke). Links session-bound hain — expire hone par engine
+  naya link deta hai, isliye panel purane daag dikhata hai ("retried ×N").
 
 Rust side (`src/web_api.rs`):
 
