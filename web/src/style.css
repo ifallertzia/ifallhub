@@ -391,7 +391,7 @@ h1, h2, h3, p { margin: 0; }
 /* "Open in VLC": hands the stream to a local player (VLC, mpv, IINA). */
 .vlc-launch { border-color: rgba(255, 92, 70, 0.35); }
 .vlc-launch:hover { border-color: var(--accent); color: var(--accent-light); }
-.vlc-button-container { position: absolute; bottom: 12px; right: 12px; z-index: 10; }
+.vlc-button-container { position: absolute; bottom: 12px; right: 12px; z-index: 10; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .vlc-button-container .vlc-button {
   display: inline-flex;
   align-items: center;
@@ -789,7 +789,15 @@ body.player-fullscreen-open { overflow: hidden; }
 
 /* Resolved playback URLs remain visible across server/mirror fallback. */
 .playback-links { margin-bottom: 20px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
-.playback-links h3 { margin: 0 0 8px; }
+.playback-links-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.playback-links h3 { margin: 0; font-size: 15px; }
+.playback-links-count { font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.playback-links-head [data-copy-all-links] { margin-left: auto; }
+.playback-links > .muted { margin: 8px 0 2px; font-size: 12px; }
+#watch-playback-links { max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
+#watch-playback-links > .muted { margin: 10px 0 0; font-size: 12px; }
 .playback-link-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
 .playback-link-main { flex: 1 1 240px; min-width: 0; display: grid; gap: 6px; overflow-wrap: anywhere; }
+.playback-link-note { display: block; margin-top: 2px; color: var(--gold); font-size: 11px; }
 .playback-link-url { width: 100%; min-width: 0; box-sizing: border-box; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; }
+.playback-link-url:focus { outline: 1px solid var(--accent-light); }

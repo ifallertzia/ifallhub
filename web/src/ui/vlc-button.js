@@ -185,6 +185,25 @@ export async function copyStreamLink({
 }
 
 /**
+ * Copies the link the player is using right now (`url`), and only resolves a
+ * fresh playback session when there is nothing playing yet. The "Copy link"
+ * button on the player uses this, so what lands on the clipboard is the same
+ * URL the browser was handed — including H.265/HEVC and `.mkv` releases the
+ * browser itself cannot decode.
+ * @returns {Promise<string>} the copied URL, or `''` when there was nothing to copy
+ */
+export async function copyPlaybackUrlOrResolve({
+  url = '',
+  streamSetId = '',
+  releaseIndex = 0,
+  mirrorIndex = 0,
+} = {}) {
+  const playing = absolutePlaybackUrl({ playback_url: url });
+  if (playing) return (await writeClipboard(playing)) ? playing : '';
+  return copyStreamLink({ streamSetId, releaseIndex, mirrorIndex });
+}
+
+/**
  * "Open in VLC" for one release: asks the engine to launch a local player and
  * falls back to copying the link when this deployment cannot launch one.
  * @returns {Promise<{opened: boolean, label?: string, url?: string, copied?: boolean, reason?: string, error?: string}>}

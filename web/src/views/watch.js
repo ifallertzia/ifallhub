@@ -3,13 +3,16 @@
 
 import * as api from '../lib/api.js';
 import * as library from '../lib/library.js';
-import { appendPlaybackLink } from '../ui/playback-links.js';
+import { appendPlaybackLink, playbackLinkUrls } from '../ui/playback-links.js';
 import {
   setCurrentPlayback,
   clearCurrentPlayback,
   createVlcButton,
   describeOpenResult,
   showVlcToast,
+  absolutePlaybackUrl,
+  copyPlaybackUrlOrResolve,
+  writeClipboard,
 } from '../ui/vlc-button.js';
 import { cardHtml, rowHtml, spinnerHtml } from '../ui/components.js';
 import {
@@ -89,6 +92,10 @@ const state = {
   autoplayNext: true,
   autoSubtitles: true,
   autoSubtitleTried: false,
+  // The link the player is currently on, so the player's Copy button hands
+  // over exactly what is playing (H.265/HEVC and `.mkv` included).
+  lastPlaybackUrl: '',
+  lastMirrorIndex: 0,
   subtitleSearchController: null,
   subtitleSetId: '',
   subtitleOptions: [],
@@ -119,6 +126,8 @@ export async function renderWatch(container, route) {
   state.resumeAt = 0;
   state.autoSubtitles = autoSubtitlesPreferred();
   state.autoSubtitleTried = false;
+  state.lastPlaybackUrl = '';
+  state.lastMirrorIndex = 0;
   state.subtitleSearchController?.abort();
   state.subtitleSearchController = null;
   state.subtitleSetId = '';
@@ -146,10 +155,19 @@ export async function renderWatch(container, route) {
         <div class="server-rotation" id="server-rotation" aria-label="Server order"></div>
       </div>
 
-      <!-- Playback links panel - Hidden from UI but functionality kept for VLC button -->
-      <div id="watch-playback-links" hidden aria-hidden="true">
-        <p class="muted" data-links-empty>No playback links resolved yet.</p>
-      </div>
+      <!-- The links the player was actually handed: readable, copyable, and
+           useful for H.265/.mkv releases the browser cannot decode. -->
+      <section class="playback-links" aria-labelledby="playback-links-title">
+        <div class="playback-links-head">
+          <h3 id="playback-links-title">Playback links</h3>
+          <span class="playback-links-count" data-links-count aria-live="polite">0 links</span>
+          <button class="ghost-button small" type="button" data-copy-all-links>Copy all</button>
+        </div>
+        <p class="muted">Player ko jo link diya jaata hai woh yahan dikhta hai — mpv/VLC me paste karne ke liye “Copy link” dabao. Session links expire ho jaate hain, aur DASH/HLS links manifest hote hain (ek single movie file nahi).</p>
+        <div id="watch-playback-links">
+          <p class="muted" data-links-empty>No playback links resolved yet.</p>
+        </div>
+      </section>
 
       <section class="watch-controls">
         <div class="watch-title-block">
@@ -239,17 +257,85 @@ function addVlcButtonToPlayer(container) {
   
   // Find the player controls area to add the button
   const playerFrame = container.querySelector('#player-frame');
-  
+
   if (playerFrame && !container.querySelector('.vlc-button-container')) {
     const buttonContainer = document.createElement('div');
     buttonContainer.className = 'vlc-button-container';
     buttonContainer.appendChild(vlcButton);
-    
+
     // Add to player frame
     playerFrame.appendChild(buttonContainer);
-    
+
     // Store reference
     state.vlcButton = vlcButton;
+  }
+
+  // Room for copying the link itself, next to the title actions. It stays on
+  // the page (not over the video) so it never fights the player controls.
+  const actions = container.querySelector('.watch-actions');
+  if (actions && !actions.querySelector('[data-copy-link]')) {
+    actions.insertBefore(createCopyLinkButton(), actions.querySelector('.switch'));
+  }
+}
+
+/**
+ * Copies the streaming link itself, so it can be read or pasted into mpv/VLC —
+ * the escape hatch for H.265/HEVC and `.mkv` releases the browser cannot decode.
+ * The copied URL is the one playback is using; before the first stream starts
+ * it resolves the selected release instead.
+ */
+function createCopyLinkButton() {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'ghost-button';
+  button.dataset.copyLink = '';
+  button.title = 'Copy this stream link (mpv, VLC, yt-dlp).';
+  const label = document.createElement('span');
+  label.textContent = '⧉ Copy link';
+  button.append(label);
+
+  button.addEventListener('click', async () => {
+    const original = label.textContent;
+    button.disabled = true;
+    label.textContent = 'Copying…';
+    let link = '';
+    try {
+      link = await copyPlaybackUrlOrResolve({
+        url: state.lastPlaybackUrl,
+        streamSetId: state.entry?.streamSetId || '',
+        releaseIndex: state.entry?.releases?.[state.selected]?.serverIndex ?? 0,
+        mirrorIndex: state.lastMirrorIndex || 0,
+      });
+    } finally {
+      button.disabled = false;
+    }
+    if (!link) {
+      label.textContent = original;
+      showVlcToast('No link to copy yet — start a stream first.', 'error');
+      return;
+    }
+    state.lastPlaybackUrl = link;
+    label.textContent = 'Copied!';
+    showVlcToast('Link copied — VLC: Media → Open Network Stream → paste. Poora link neeche “Playback links” me hai.', 'success');
+    window.setTimeout(() => {
+      label.textContent = original;
+    }, 2500);
+  });
+
+  return button;
+}
+
+/** Copies every listed link at once (newline separated) for a bulk paste. */
+async function copyAllPlaybackLinks() {
+  const urls = playbackLinkUrls(document.querySelector('#watch-playback-links'));
+  if (!urls.length) {
+    setStatus('No links to copy yet — playback resolves them one by one.', false);
+    return;
+  }
+  if (await writeClipboard(urls.join('\n'))) {
+    setStatus(`${urls.length} link${urls.length === 1 ? '' : 's'} copied — paste into mpv/VLC.`, false);
+  } else {
+    setStatus('Could not copy automatically — use each link’s Copy button.', false);
   }
 }
 
@@ -258,6 +344,9 @@ function bind(container) {
   container.querySelector('[data-retry-server]')?.addEventListener('click', () => {
     hideOverlay();
     startRotation({ startAfter: state.current || undefined });
+  });
+  container.querySelector('[data-copy-all-links]')?.addEventListener('click', () => {
+    void copyAllPlaybackLinks();
   });
   const watchlistButton = container.querySelector('[data-watchlist]');
   watchlistButton?.addEventListener('click', async () => {
@@ -871,8 +960,24 @@ function paintRotation() {
 }
 
 function showPlaybackLink(attempt) {
-  appendPlaybackLink(document.querySelector('#watch-playback-links'), attempt, window.location.origin);
-  
+  // Name the releases the browser cannot decode, so the copied link is
+  // obviously the "open this in mpv/VLC" one.
+  const reason = unsupportedReason(attempt.release);
+  const note = reason === 'codec'
+    ? 'H.265/HEVC — browser decode nahi kar sakta, mpv/VLC me chalega'
+    : reason === 'container'
+      ? '.mkv container — browser me nahi, mpv/VLC me chalega'
+      : '';
+  appendPlaybackLink(
+    document.querySelector('#watch-playback-links'),
+    { ...attempt, note },
+    window.location.origin,
+  );
+
+  // Remember the exact link playback is on for the player's "Copy link".
+  state.lastPlaybackUrl = absolutePlaybackUrl(attempt.playback) || state.lastPlaybackUrl;
+  state.lastMirrorIndex = attempt.mirrorIndex || 0;
+
   // Also set the current playback for VLC button
   setCurrentPlayback(
     attempt.playback,

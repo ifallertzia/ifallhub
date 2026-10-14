@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendPlaybackLink } from '../src/ui/playback-links.js';
+import { MAX_LINK_ROWS, appendPlaybackLink, playbackLinkUrls } from '../src/ui/playback-links.js';
 
 // Minimal DOM double: verify text/value rendering and the real click handler
 // without adding a DOM dependency to this small frontend feature.
@@ -85,4 +85,44 @@ test('missing or unsafe URLs and detached page do not add rows', (t) => {
   }
   appendPlaybackLink(null, attempt, origin);
   assert.equal(container.children.length, 0);
+});
+
+test('an H.265/.mkv release is labelled with its note on the row', (t) => {
+  const container = setup(t);
+  const release = {
+    filename: 'Movie.2024.2160p.WEB-DL.HEVC.mkv',
+    codec: 'h265',
+    mirrors: [{ label: 'Primary' }],
+  };
+  appendPlaybackLink(container, { ...attempt, release, mirrorIndex: 0, note: 'H.265/HEVC — mpv/VLC me chalega' }, origin);
+  const [caption] = container.children[0].children[0].children;
+  assert.equal(caption.children.length, 1);
+  assert.equal(caption.children[0].className, 'playback-link-note');
+  assert.equal(caption.children[0].textContent, '⚠ H.265/HEVC — mpv/VLC me chalega');
+});
+
+test('the same link is listed once and marked as retried', (t) => {
+  const container = setup(t);
+  appendPlaybackLink(container, attempt, origin);
+  appendPlaybackLink(container, attempt, origin);
+  appendPlaybackLink(container, attempt, origin);
+  assert.equal(container.children.length, 1);
+  const [caption] = container.children[0].children[0].children;
+  assert.match(caption.textContent, /· retried ×2$/);
+  assert.deepEqual(playbackLinkUrls(container), [new URL(attempt.playback.playback_url, origin).href]);
+});
+
+test('the panel keeps the newest MAX_LINK_ROWS links', (t) => {
+  const container = setup(t);
+  for (let index = 0; index < MAX_LINK_ROWS + 5; index += 1) {
+    appendPlaybackLink(container, { ...attempt, playback: { url: `/api/media/token/${index}/video.m4s` } }, origin);
+  }
+  const urls = playbackLinkUrls(container);
+  assert.equal(urls.length, MAX_LINK_ROWS);
+  assert.equal(urls.at(-1), `${origin}/api/media/token/${MAX_LINK_ROWS + 4}/video.m4s`);
+  assert.equal(urls.includes(`${origin}/api/media/token/0/video.m4s`), false);
+});
+
+test('playbackLinkUrls tolerates a detached panel', () => {
+  assert.deepEqual(playbackLinkUrls(null), []);
 });

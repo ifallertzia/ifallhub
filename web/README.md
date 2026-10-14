@@ -15,6 +15,13 @@ On top of search and playback the web app is a full tracking client:
   cannot decode them. When the deployment has no local player (a hosted server),
   the button copies the link and shows paste-into-VLC instructions instead.
 
+- **Playback links** — the player page lists every link the player is handed
+  (provider · quality · mirror · stream type) with its full URL, a per-link
+  "Copy link" button and a "Copy all" button, so an H.265/HEVC or `.mkv` release
+  the browser cannot decode can be pasted into mpv/VLC. `⧉ Copy link` in the page
+  actions copies the URL playback is using right now. These links are short-lived
+  proxy/session URLs: they are never stored or sent anywhere else.
+
 - **Home carousels** — Continue Watching, Trending Now, Top Rated, Fresh & Highly
   Rated, Most Watched, plus a personalised "Because you watch" row.
 - **Official ratings** — IMDb scores come from the catalog metrics and

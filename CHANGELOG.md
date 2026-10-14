@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Fixed
+- **Web player: playback links are visible and copyable again**:
+  - Restored the "Playback links" panel on the player page. It had been hidden behind `hidden`/`aria-hidden` during the phone-controls redesign, which is why the resolved links — including the `.h265`/HEVC releases the browser cannot decode — stopped showing up at all. Every link the player is handed is listed again with its provider, quality, mirror and stream type, and H.265/HEVC or `.mkv` entries carry a `⚠` note saying mpv/VLC will play them.
+  - Each row shows the full URL in a selectable field with its own "Copy link" button, plus a "Copy all" button for the whole list. Copying falls back to the legacy `execCommand` path (and to selecting the text) when the Clipboard API is unavailable, a copied row confirms with "Copied!", retried links update their row instead of stacking duplicates, and the list keeps the newest 40 links.
+  - Added a "⧉ Copy link" action to the player page: it copies the exact URL playback is using right now (or resolves the selected release when nothing is playing yet) and confirms with a paste-into-VLC toast, so an H.265/HEVC or `.mkv` release can be handed to mpv/VLC in one click.
 - **Media Playback & Subtitle Engine**:
   - Reset legacy Android player defaults in graphical X11 and Wayland sessions so native Linux players take precedence over external Android intent dialogs.
   - Prioritized native Linux media player paths over foreign container fallbacks on Linux systems and preserved dynamic auto-player resolution for unconfigured sessions.
