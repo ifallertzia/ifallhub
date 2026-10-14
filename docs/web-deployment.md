@@ -9,10 +9,13 @@ same-origin `/api/media/...` URLs.
 
 ## Use a Render Web Service (Docker) - not a Static Site
 
-Deploy this as a **single Render Web Service built from the repository
-`Dockerfile`**. Do **not** deploy `web/dist` as a Render Static Site: the Vite
-demo API is development-only and is not part of the production build, so a
-static host has no `/api/*` backend and real search/playback cannot work.
+The repository's `.github/workflows/pages.yml` deploys the **mdBook
+documentation only**; it does not deploy the movie web app. GitHub Pages and
+other static hosts cannot run the Rust API. Deploy the app as a **single Render
+Web Service built from the repository `Dockerfile`** instead. Do **not** deploy
+`web/dist` as a static site: the Vite demo API is development-only and is not
+part of the production build, so a static host has no `/api/*` backend and real
+search/playback cannot work.
 
 The production container runs two processes behind one public origin:
 
