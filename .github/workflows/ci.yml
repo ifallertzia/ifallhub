@@ -27,6 +27,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "ci-hygiene"
+      - name: Run web tests
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+      - name: Verify Vercel config scripts resolve
+        run: |
+          # The web suite checks vercel.json references; this keeps the shell
+          # entrypoints parseable even if npm is skipped.
+          for script in deploy/vercel-*.sh; do
+            sh -n "$script"
+          done
       - name: Check Rust formatting
         run: |
           set +e

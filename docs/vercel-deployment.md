@@ -24,8 +24,8 @@ deployment, so there is no CORS, the access-key cookie keeps working, and
     "site": {
       "root": ".",
       "runtime": "node",
-      "installCommand": "npm ci --prefix web",
-      "buildCommand": "npm run build --prefix web",
+      "installCommand": "sh deploy/vercel-site-install.sh",
+      "buildCommand": "sh deploy/vercel-site-build.sh",
       "entrypoint": "deploy/vercel-app.sh",
       "bindings": [
         { "type": "service", "service": "api", "format": "url", "env": "API_URL" }
@@ -34,7 +34,7 @@ deployment, so there is no CORS, the access-key cookie keeps working, and
     "api": {
       "root": ".",
       "runtime": "rust",
-      "buildCommand": "cargo build --release --locked",
+      "buildCommand": "sh deploy/vercel-api-build.sh",
       "entrypoint": "deploy/vercel-api.sh"
     }
   },
@@ -45,6 +45,16 @@ deployment, so there is no CORS, the access-key cookie keeps working, and
 ```
 
 - **`site`** is the only service with public traffic (the catch-all rewrite).
+- Build steps are scripts, not inline shell: `deploy/vercel-site-install.sh`,
+  `deploy/vercel-site-build.sh` and `deploy/vercel-api-build.sh` resolve their
+  own repository root from `$0` and then `cd` where they need to be. `npm ci` is
+  run **inside** `web/`; announcing the working directory in the log, this
+  avoids `npm --prefix web`, which Vercel's build sandbox resolved from the
+  wrong directory and which failed with npm's "can only install with an
+  existing package-lock.json" (EUSAGE) error even though the lockfile is
+  committed. The install script falls back to `npm install` when a stripped
+  checkout has no lockfile, and the API build script installs the Rust
+  toolchain itself if the runtime image ships without `cargo`.
 - **`api`** is internal: it has no rewrite and is reachable only through the
   `API_URL` binding declared on `site`.
 - The binding injects the API's internal base URL into `site` at runtime;
@@ -90,6 +100,11 @@ frontend at another backend (that variable overrides the binding).
 4. Open the deployment URL. `/api/health` must answer
    `{"engine":"MovieBox-Tui","status":"ok","version":"0.1.27"}`.
 
+The build log should show `[site] installing in /vercel/path0/web` followed by
+`[site] web/dist ready`, then `[api] engine built: moviebox-tui 0.1.27`. Those
+markers come from the build scripts and make a failed deploy diagnosable from
+its log alone.
+
 Verify a deployment from a machine with the repository checked out:
 
 ```bash
@@ -114,12 +129,26 @@ media through the proxy, which is the check that catches provider outages.
 - **No local player.** There is no desktop session on Vercel, so "Open in VLC"
   degrades to copying the link (`deploy/vercel-api.sh` sets
   `MOVIEBOX_WEB_LOCAL_PLAYER=0`).
+- **Build time.** The API service compiles the engine (`cargo build --release
+  --locked`). `deploy/vercel-api-build.sh` switches the release profile to thin
+  LTO with 16 codegen units to fit a two-core builder; `Cargo.toml` is
+  untouched, so local and CI release builds keep fat LTO.
 - **Cold starts and long requests.** Provider searches can take several seconds;
   keep rate limits sane and expect the first request after idle to be slower
   while the engine service wakes.
 - **Server-sent events.** `/api/library/events` is proxied without buffering,
   but a platform proxy may still cut a long-lived stream. The client falls back
   to polling automatically, so syncing keeps working either way.
+
+## Troubleshooting
+
+| Log line | Cause | Fix |
+| --- | --- | --- |
+| `npm error The npm ci command can only install with an existing package-lock.json` | an install command was given a `--prefix` that Vercel did not resolve | keep `installCommand` as `sh deploy/vercel-site-install.sh`, which changes into `web/` itself |
+| `[site] web/dist ready` missing | the Vite build failed | read above that line; it is a normal `npm run build` error |
+| `[api] cargo not found on PATH` | the runtime image has no Rust toolchain | the script installs rustup automatically; check that the build can reach `sh.rustup.rs` |
+| `[api] cargo finished without target/release/moviebox-tui` | a compile error | the cargo output above it is the real error |
+| 502 from `/api/*` | the `site` service cannot reach the bound API | confirm the `API_URL` binding exists on `site` and that the `api` service starts (its logs print the listen address) |
 
 ## Alternatives
 
