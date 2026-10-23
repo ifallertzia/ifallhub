@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   diag:
@@ -20,22 +21,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "diag"
-      - name: Formatting diff
-        if: always()
+      - name: Formatting and build
         run: |
           set +e
           cargo fmt --check > /tmp/fmt.log 2>&1
           echo "fmt exit: $?"
-          head -n 60 /tmp/fmt.log | while IFS= read -r line; do
-            echo "::error::${line:0:900}"
-          done
-      - name: Build errors
-        if: always()
-        run: |
-          set +e
           cargo build --all-features --locked --message-format=short > /tmp/build.log 2>&1
-          status=$?
-          echo "build exit: $status"
-          grep -E "error(\[|:)" /tmp/build.log | head -n 20 | while IFS= read -r line; do
-            echo "::error::${line:0:900}"
-          done
+          echo "build exit: $?"
+          cargo clippy --all-targets --all-features --locked -- -D warnings > /tmp/clippy.log 2>&1
+          echo "clippy exit: $?"
+      - name: Report
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo '### Diag'
+            echo '```'
+            echo '--- fmt ---'
+            head -n 60 /tmp/fmt.log 2>/dev/null
+            echo '--- build ---'
+            grep -E "error|warning: unused" /tmp/build.log 2>/dev/null | head -n 40
+            echo '--- build tail ---'
+            tail -n 20 /tmp/build.log 2>/dev/null
+            echo '--- clippy ---'
+            grep -E "^(error|warning)" /tmp/clippy.log 2>/dev/null | head -n 40
+            echo '```'
+          } > /tmp/diag.md
+          gh pr comment "${PR}" --body-file /tmp/diag.md

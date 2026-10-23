@@ -3078,7 +3078,10 @@ mod tests {
 
     #[test]
     fn test_web_api_addr_prefers_explicit_argument() {
-        let env = env_of(&[("MOVIEBOX_WEB_API_ADDR", "127.0.0.1:9000"), ("PORT", "8080")]);
+        let env = env_of(&[
+            ("MOVIEBOX_WEB_API_ADDR", "127.0.0.1:9000"),
+            ("PORT", "8080"),
+        ]);
         assert_eq!(
             resolve_listen_addr(Some("127.0.0.1:8787"), env),
             "127.0.0.1:8787"
@@ -3087,7 +3090,10 @@ mod tests {
 
     #[test]
     fn test_web_api_addr_uses_configured_address_before_port() {
-        let env = env_of(&[("MOVIEBOX_WEB_API_ADDR", "127.0.0.1:9000"), ("PORT", "8080")]);
+        let env = env_of(&[
+            ("MOVIEBOX_WEB_API_ADDR", "127.0.0.1:9000"),
+            ("PORT", "8080"),
+        ]);
         assert_eq!(resolve_listen_addr(None, env), "127.0.0.1:9000");
     }
 
