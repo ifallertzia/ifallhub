@@ -41,6 +41,12 @@
   - Scoped Snap package detection to `SNAP_NAME` matching `moviebox-tui` to prevent false positive Snap environment detection when launched inside unrelated host sandboxes.
 
 ### Changed
+- **Vercel deployment is a container image now (fixes the failed deploys)**:
+  - Vercel's `rust` runtime executes a `vercel_runtime` Function, not a long-running server, and service bindings are unsupported for Rust/Go services. The earlier two-service layout (Node `site` + Rust `api` with an `API_URL` binding) could therefore never serve the engine, even after its build was fixed.
+  - The project now deploys as a single container-image Function: `Dockerfile.vercel` builds the same Vite frontend and static musl engine as the Render image, runs `node deploy/server.mjs` on port 80 and proxies `/api/*` to the engine on loopback. `vercel.json` is reduced to its schema so container auto-detection owns routing; the obsolete `deploy/vercel-*.sh` service scripts are gone.
+  - The Vercel image keeps writable state under `/tmp` (the container filesystem is read-only), runs as root so it can bind port 80, and builds with thin LTO plus 16 codegen units to fit a two-core builder (`Cargo.toml` keeps fat LTO).
+  - `.vercelignore` re-includes `Dockerfile.vercel`; `web/tests/vercel-config.test.js` asserts the port, the `/tmp` paths, structural parity with the Render `Dockerfile`, and that the upload keeps everything the image copies.
+  - CI now builds and smoke-tests `Dockerfile.vercel` alongside the Render image, so a broken container fails the pull request instead of the deploy.
 - **Vercel services deployment**:
   - Fixed the deploy-time `npm ci` failure ("can only install with an existing package-lock.json", EUSAGE): the `site` service no longer runs `npm ci --prefix web`, which Vercel's build sandbox resolved from the wrong directory. `deploy/vercel-site-install.sh` and `deploy/vercel-site-build.sh` locate the repository root from `$0`, change into `web/`, log the working directory, and fall back to `npm install` only when a stripped checkout has no lockfile.
   - Added `deploy/vercel-api-build.sh` for the `api` service: it uses the runtime's cargo, installs rustup when the image has none, builds with thin LTO and 16 codegen units so a two-core Vercel builder finishes in budget (Cargo.toml keeps fat LTO for local/CI), and verifies the produced binary.

@@ -1,34 +1,3 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "services": {
-    "site": {
-      "root": ".",
-      "runtime": "node",
-      "installCommand": "sh deploy/vercel-site-install.sh",
-      "buildCommand": "sh deploy/vercel-site-build.sh",
-      "entrypoint": "deploy/vercel-app.sh",
-      "bindings": [
-        {
-          "type": "service",
-          "service": "api",
-          "format": "url",
-          "env": "API_URL"
-        }
-      ]
-    },
-    "api": {
-      "root": ".",
-      "runtime": "rust",
-      "buildCommand": "sh deploy/vercel-api-build.sh",
-      "entrypoint": "deploy/vercel-api.sh"
-    }
-  },
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": {
-        "service": "site"
-      }
-    }
-  ]
+  "$schema": "https://openapi.vercel.sh/vercel.json"
 }

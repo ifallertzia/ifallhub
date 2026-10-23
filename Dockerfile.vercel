@@ -1,0 +1,70 @@
+# Dockerfile for Vercel Functions running a container image (runtime "container").
+#
+# Vercel auto-detects this file at the project root and routes all traffic to
+# the image, so no `services`/`rewrites` block is needed in vercel.json.
+#
+# It builds the same two things the Render image does - the Vite frontend and
+# the headless Rust engine - and runs them as one process tree: node serves
+# web/dist on $PORT and proxies /api/* to the engine on 127.0.0.1:8787.
+# `deploy/server.mjs` accepts API_URL (a service binding) or MOVIEBOX_API_TARGET
+# so the same image can also proxy to an engine hosted elsewhere.
+#
+# Differences from the root Dockerfile (Render):
+#   * listens on port 80, which is where Vercel sends traffic by default
+#     (override with the PORT environment variable in project settings);
+#   * runs as root so it is allowed to bind port 80, and keeps every writable
+#     path under /tmp because the container filesystem is read-only;
+#   * builds with thin LTO and parallel codegen units to fit a two-core
+#     builder, while Cargo.toml keeps fat LTO for local and CI release builds.
+
+# ---- Frontend build --------------------------------------------------------
+FROM node:22-alpine AS web-build
+WORKDIR /build/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
+# ---- Rust API build (static musl binary) -----------------------------------
+FROM rust:1.90-alpine AS api-build
+RUN apk add --no-cache build-base
+ENV CARGO_PROFILE_RELEASE_LTO=thin \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo/ .cargo/
+# Warm the dependency graph with placeholder sources so source edits do not
+# recompile every crate.
+RUN mkdir -p src \
+    && printf 'pub fn placeholder() {}\n' > src/lib.rs \
+    && printf 'fn main() {}\n' > src/main.rs \
+    && cargo build --release --locked \
+    && rm -rf src target/release/moviebox-tui
+COPY src/ src/
+# Docker COPY preserves old mtimes, so bump them to force a rebuild over the
+# cached dependency graph; then verify the binary is the real CLI (the
+# placeholder above prints nothing) before shipping it to the runtime stage.
+RUN find src -name '*.rs' -exec touch {} + \
+    && cargo build --release --locked \
+    && ./target/release/moviebox-tui --version | grep -q 'moviebox-tui' \
+    && cp target/release/moviebox-tui /moviebox-tui
+
+# ---- Runtime ---------------------------------------------------------------
+FROM node:22-alpine AS runtime
+RUN apk add --no-cache tini
+WORKDIR /app
+ENV NODE_ENV=production \
+    PORT=80 \
+    MOVIEBOX_API_BIN=/app/moviebox-tui \
+    MOVIEBOX_API_ADDR=127.0.0.1:8787 \
+    MOVIEBOX_WEB_ROOT=/app/web/dist \
+    MOVIEBOX_WEB_LOCAL_PLAYER=0 \
+    MOVIEBOX_DATA_DIR=/tmp/ifallhub/data \
+    MOVIEBOX_CONFIG_DIR=/tmp/ifallhub/config
+COPY deploy/server.mjs deploy/smoke.mjs ./deploy/
+COPY --from=web-build /build/web/dist ./web/dist
+COPY --from=api-build /moviebox-tui ./moviebox-tui
+RUN mkdir -p /tmp/ifallhub/data /tmp/ifallhub/config
+EXPOSE 80
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "deploy/server.mjs"]

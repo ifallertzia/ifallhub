@@ -1,89 +1,106 @@
-// Guards the Vercel deployment wiring: a service whose build script was renamed
-// or lost its executable bit fails at deploy time, not at review time, so the
-// config is checked here instead.
+// Guards the Vercel deployment wiring. The project deploys as a single
+// container-image Function, so the failure modes worth catching here are: the
+// Dockerfile.vercel disappearing or being ignored on upload, and the image
+// listening somewhere other than the port Vercel sends traffic to.
 import assert from 'node:assert/strict';
-import { statSync, readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import test from 'node:test';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const configPath = path.join(repoRoot, 'vercel.json');
 
-function readConfig() {
-  return JSON.parse(readFileSync(configPath, 'utf8'));
+const read = (relativePath) => readFileSync(path.join(repoRoot, relativePath), 'utf8');
+
+/// Join backslash continuations so one instruction is one line.
+function instructions(dockerfile) {
+  const joined = dockerfile.replace(/\\\r?\n\s*/g, ' ');
+  return joined
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
 }
 
-function assertExecutableFile(relativePath, label = relativePath) {
-  const fullPath = path.join(repoRoot, relativePath);
-  const stats = statSync(fullPath);
-  assert.ok(stats.isFile(), `${label} must be a file`);
-  assert.ok((stats.mode & 0o111) !== 0, `${label} must be executable`);
+function instructionList(dockerfile, keep) {
+  return instructions(dockerfile)
+    .map((line) => line.replace(/\s+/g, ' '))
+    .filter((line) => keep.test(line.split(' ')[0].toUpperCase()));
 }
 
-/// `sh deploy/x.sh` and `deploy/x.sh` both have to point at a real script.
-function scriptPath(command) {
-  if (!command) return null;
-  const trimmed = command.trim();
-  const match = trimmed.match(/^(?:sh|bash|\.)\s+(\S+\.sh)$/);
-  if (match) return match[1];
-  if (/^\S+\.sh$/.test(trimmed)) return trimmed;
-  return null;
-}
-
-test('vercel.json declares the public site and internal api services', () => {
-  const config = readConfig();
-  assert.equal(config.$schema, 'https://openapi.vercel.sh/vercel.json');
-  assert.deepEqual(Object.keys(config.services).sort(), ['api', 'site']);
-  assert.equal(config.services.site.runtime, 'node');
-  assert.equal(config.services.api.runtime, 'rust');
+test('Dockerfile.vercel exists at the project root', () => {
+  const stats = statSync(path.join(repoRoot, 'Dockerfile.vercel'));
+  assert.ok(stats.isFile());
 });
 
-test('every Vercel build script exists and is executable', () => {
-  const config = readConfig();
-  for (const [name, service] of Object.entries(config.services)) {
-    assertExecutableFile(service.entrypoint, `${name} entrypoint`);
-    for (const key of ['installCommand', 'buildCommand']) {
-      const script = scriptPath(service[key]);
-      if (script) assertExecutableFile(script, `${name} ${key}`);
-    }
-  }
+test('the image listens where Vercel sends traffic', () => {
+  const lines = instructions(read('Dockerfile.vercel'));
+  const joined = lines.join('\n');
+  // Vercel routes container traffic to port 80 unless PORT is set in the
+  // project settings, so the image default must match.
+  assert.match(joined, /PORT=80\b/, 'the runtime stage must default PORT to 80');
+  assert.match(joined, /^EXPOSE 80$/m, 'the image must expose port 80');
+  assert.match(
+    joined,
+    /CMD \["node", ?"deploy\/server\.mjs"\]/,
+    'the container must start the web server',
+  );
+  // Binding port 80 needs root inside the container.
+  assert.doesNotMatch(joined, /^USER (?!root)/m, 'dropping privileges would break the port 80 bind');
 });
 
-test('build commands avoid npm --prefix, which Vercel resolved from the wrong directory', () => {
-  const config = readConfig();
-  const commands = Object.values(config.services)
-    .flatMap((service) => [service.installCommand, service.buildCommand])
-    .filter(Boolean);
-  for (const command of commands) {
-    assert.doesNotMatch(
-      command,
-      /--prefix\s+web/,
-      'run npm inside web/ instead of passing --prefix web',
+test('writable state stays under /tmp because the container filesystem is read-only', () => {
+  const joined = instructions(read('Dockerfile.vercel')).join('\n');
+  assert.match(joined, /MOVIEBOX_DATA_DIR=\/tmp\//);
+  assert.match(joined, /MOVIEBOX_CONFIG_DIR=\/tmp\//);
+});
+
+test('the Vercel image builds the same stack as the Render image', () => {
+  // Structural parity: same stages, same sources copied, same start command.
+  // ENV/EXPOSE/USER lines are the documented differences (port 80, root, /tmp).
+  const keep = /^(FROM|WORKDIR|COPY|RUN|ENTRYPOINT|CMD)$/;
+  const normalize = (list) =>
+    list
+      .filter((line) => !line.startsWith('RUN mkdir -p /tmp/'))
+      .map((line) => line.replace(/\s+/g, ' '));
+  const render = normalize(instructionList(read('Dockerfile'), keep));
+  const vercel = normalize(instructionList(read('Dockerfile.vercel'), keep));
+  assert.deepEqual(vercel, render);
+});
+
+test('vercel.json stays out of the way of container auto-detection', () => {
+  const config = JSON.parse(read('vercel.json'));
+  // Vercel detects Dockerfile.vercel and adds the routing rewrite itself. A
+  // `services` block would take over routing and is what broke the earlier
+  // Node + Rust experiment.
+  assert.equal(config.services, undefined);
+  assert.equal(config.rewrites, undefined);
+  assert.equal(config.functions, undefined);
+});
+
+test('.vercelignore keeps everything the image build needs', () => {
+  const ignore = read('.vercelignore');
+  const rules = ignore
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+
+  // Negations come after the exclusion they undo.
+  const dockerIgnoreIndex = rules.indexOf('/Dockerfile');
+  const dockerKeepIndex = rules.indexOf('!Dockerfile.vercel');
+  assert.ok(dockerIgnoreIndex >= 0, '/Dockerfile should stay excluded (Render only)');
+  assert.ok(dockerKeepIndex > dockerIgnoreIndex, 'Dockerfile.vercel must be re-included');
+
+  for (const needed of ['web', 'src', 'deploy', 'Cargo.toml', 'Cargo.lock']) {
+    assert.ok(
+      !rules.includes(`/${needed}`) && !rules.includes(needed),
+      `${needed} is copied by the Dockerfile and must not be ignored`,
     );
   }
+  assert.ok(!rules.some((rule) => rule.replace(/^\//, '') === 'Dockerfile.vercel'));
 });
 
-test('the site service binds the api service and is the only public one', () => {
-  const config = readConfig();
-  const bindings = config.services.site.bindings ?? [];
-  assert.deepEqual(bindings, [
-    { type: 'service', service: 'api', format: 'url', env: 'API_URL' },
-  ]);
-  assert.equal(config.services.api.bindings, undefined);
-
-  // A service is internal until a rewrite targets it, so the single catch-all
-  // must point at `site` and must be the least specific entry (last).
-  const rewrites = config.rewrites ?? [];
-  assert.ok(rewrites.length > 0, 'a rewrite is needed to publish the site service');
-  const last = rewrites[rewrites.length - 1];
-  assert.equal(last.destination?.service, 'site');
-  assert.equal(last.source, '/(.*)');
-  for (const rewrite of rewrites) {
-    assert.notEqual(
-      rewrite.destination?.service,
-      'api',
-      'the api service must stay internal',
-    );
-  }
+test('the deploy scripts referenced by the image exist', () => {
+  assert.ok(statSync(path.join(repoRoot, 'deploy/server.mjs')).isFile());
+  assert.ok(statSync(path.join(repoRoot, 'deploy/smoke.mjs')).isFile());
+  assert.ok(statSync(path.join(repoRoot, 'web/package-lock.json')).isFile());
 });
