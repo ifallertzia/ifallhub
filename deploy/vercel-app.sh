@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Entrypoint for the public `site` service on Vercel services.
 #
 # Serves the built frontend from web/dist and reverse-proxies same-origin
@@ -6,7 +6,7 @@
 # the service binding declared in vercel.json (`API_URL`), so nothing here
 # hardcodes a host or port; MOVIEBOX_API_TARGET still overrides it for local
 # runs and other hosts.
-set -euo pipefail
+set -eu
 
 cd "$(dirname "$0")/.."
 

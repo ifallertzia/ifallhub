@@ -4,8 +4,8 @@
     "site": {
       "root": ".",
       "runtime": "node",
-      "installCommand": "npm ci --prefix web",
-      "buildCommand": "npm run build --prefix web",
+      "installCommand": "sh deploy/vercel-site-install.sh",
+      "buildCommand": "sh deploy/vercel-site-build.sh",
       "entrypoint": "deploy/vercel-app.sh",
       "bindings": [
         {
@@ -19,7 +19,7 @@
     "api": {
       "root": ".",
       "runtime": "rust",
-      "buildCommand": "cargo build --release --locked",
+      "buildCommand": "sh deploy/vercel-api-build.sh",
       "entrypoint": "deploy/vercel-api.sh"
     }
   },

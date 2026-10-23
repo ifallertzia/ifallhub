@@ -42,6 +42,9 @@
 
 ### Changed
 - **Vercel services deployment**:
+  - Fixed the deploy-time `npm ci` failure ("can only install with an existing package-lock.json", EUSAGE): the `site` service no longer runs `npm ci --prefix web`, which Vercel's build sandbox resolved from the wrong directory. `deploy/vercel-site-install.sh` and `deploy/vercel-site-build.sh` locate the repository root from `$0`, change into `web/`, log the working directory, and fall back to `npm install` only when a stripped checkout has no lockfile.
+  - Added `deploy/vercel-api-build.sh` for the `api` service: it uses the runtime's cargo, installs rustup when the image has none, builds with thin LTO and 16 codegen units so a two-core Vercel builder finishes in budget (Cargo.toml keeps fat LTO for local/CI), and verifies the produced binary.
+  - The Vercel entrypoints are now POSIX `sh` scripts instead of bash, so they run whichever shell the platform uses.
   - Added a root `vercel.json` describing a two-service project: a public `site` service (Node, serves `web/dist`, SPA fallback, rate limits and the streaming `/api` proxy) and an internal `api` service (Rust engine via `moviebox-tui --web-api`), with one catch-all rewrite to `site`.
   - Added the `API_URL` service binding on `site`: `deploy/vercel-app.sh` and `deploy/server.mjs` now read the injected URL (after the explicit `MOVIEBOX_API_TARGET` override), normalise a trailing slash, and refuse to start rather than silently proxying to loopback when neither is set.
   - `--web-api` now resolves its listen address as argument → `MOVIEBOX_WEB_API_ADDR` → `PORT` (`0.0.0.0:$PORT`) → `127.0.0.1:8787`, so a platform that injects `PORT` can reach the engine while local runs stay on loopback (`resolve_listen_addr` in `src/web_api.rs`, unit tested).

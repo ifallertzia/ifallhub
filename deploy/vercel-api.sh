@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Entrypoint for the internal `api` service on Vercel services.
 #
 # Runs the headless Rust engine (`moviebox-tui --web-api`) as a long-lived
@@ -10,7 +10,7 @@
 # container filesystem, which is ephemeral on Vercel: it survives restarts of
 # the same instance but is reset by a new deployment. Point MOVIEBOX_DATA_DIR /
 # MOVIEBOX_CONFIG_DIR at a mounted volume if you need it to persist.
-set -euo pipefail
+set -eu
 
 cd "$(dirname "$0")/.."
 
