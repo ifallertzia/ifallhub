@@ -519,6 +519,42 @@ fn spawn_local_player(
     }
 }
 
+/// Default loopback listener, used when no address is configured.
+pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:8787";
+
+/// Resolve the listen address for `--web-api`.
+///
+/// Precedence:
+/// 1. the explicit `--web-api ADDR` argument,
+/// 2. `MOVIEBOX_WEB_API_ADDR`,
+/// 3. the platform `PORT` (Vercel, Render and friends), bound on `0.0.0.0`,
+/// 4. [`DEFAULT_LISTEN_ADDR`], so a local run is never exposed by accident.
+///
+/// Only the `PORT` path binds every interface: it exists for managed hosts
+/// where the platform proxy reaches the process over the container network.
+pub fn resolve_listen_addr<F>(explicit: Option<&str>, env: F) -> String
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let clean = |value: Option<String>| {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    if let Some(addr) = explicit.map(str::trim).filter(|addr| !addr.is_empty()) {
+        return addr.to_string();
+    }
+    if let Some(addr) = clean(env("MOVIEBOX_WEB_API_ADDR")) {
+        return addr;
+    }
+    // A bare `PORT` is the managed-host convention: listen on every interface
+    // so the platform proxy can reach us. Reject anything that is not a port.
+    if let Some(port) = clean(env("PORT")).filter(|port| port.parse::<u16>().is_ok()) {
+        return format!("0.0.0.0:{port}");
+    }
+    DEFAULT_LISTEN_ADDR.to_string()
+}
+
 /// Start the local web API. Use `127.0.0.1:8787` for a same-device frontend.
 pub async fn run(addr: &str) -> io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
@@ -3026,6 +3062,61 @@ async fn resolve_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Owned input on purpose: returning `impl Fn` from a borrowed slice would
+    // capture the slice lifetime under Rust 2024 and outlive the temporary.
+    fn env_of(pairs: Vec<(&'static str, &'static str)>) -> impl Fn(&str) -> Option<String> {
+        move |key: &str| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    #[test]
+    fn test_web_api_addr_prefers_explicit_argument() {
+        let env = env_of(vec![
+            ("MOVIEBOX_WEB_API_ADDR", "127.0.0.1:9000"),
+            ("PORT", "8080"),
+        ]);
+        assert_eq!(
+            resolve_listen_addr(Some("127.0.0.1:8787"), env),
+            "127.0.0.1:8787"
+        );
+    }
+
+    #[test]
+    fn test_web_api_addr_uses_configured_address_before_port() {
+        let env = env_of(vec![
+            ("MOVIEBOX_WEB_API_ADDR", "127.0.0.1:9000"),
+            ("PORT", "8080"),
+        ]);
+        assert_eq!(resolve_listen_addr(None, env), "127.0.0.1:9000");
+    }
+
+    #[test]
+    fn test_web_api_addr_binds_all_interfaces_for_managed_port() {
+        // Vercel/Render services inject PORT and reach the process over the
+        // container network, so the listener must not stay on loopback.
+        let env = env_of(vec![("PORT", "3000")]);
+        assert_eq!(resolve_listen_addr(None, env), "0.0.0.0:3000");
+        // An empty or malformed PORT must never widen the listener.
+        for raw in ["", "   ", "not-a-port", "127.0.0.1:3000", "70000"] {
+            let env = env_of(vec![("PORT", raw)]);
+            assert_eq!(resolve_listen_addr(None, env), DEFAULT_LISTEN_ADDR);
+        }
+    }
+
+    #[test]
+    fn test_web_api_addr_falls_back_to_loopback() {
+        let env = env_of(Vec::new());
+        assert_eq!(resolve_listen_addr(None, env), "127.0.0.1:8787");
+        assert_eq!(
+            resolve_listen_addr(Some("   "), env_of(vec![("PORT", "3000")])),
+            "0.0.0.0:3000"
+        );
+    }
 
     async fn read_http_head(socket: &mut tokio::net::TcpStream) -> String {
         let mut collected = Vec::new();

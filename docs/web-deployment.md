@@ -183,6 +183,14 @@ node deploy/smoke.mjs --base http://127.0.0.1:3000 --token devkey --real
   `python3 scripts/check_playback_links.py`; the full cause table and every link
   the player uses are in [`playback-links.md`](playback-links.md).
 
+## Vercel
+
+A Vercel services project (`vercel.json` at the repository root) is supported as
+well: a public `site` service serves the frontend and proxies `/api/*` to an
+internal `api` service through the `API_URL` service binding. Storage there is
+ephemeral, so watchlists and resume points reset with each deployment. See
+[vercel-deployment.md](vercel-deployment.md).
+
 ## Scope and compliance
 
 Streams come from the providers and add-ons you configure. Only use this with

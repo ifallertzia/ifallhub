@@ -1,0 +1,20 @@
+# Keep the Vercel upload small: only what the two services build or serve.
+# The `site` service needs web/ (+ its lockfile) and deploy/; the `api` service
+# needs Cargo.toml, Cargo.lock, src/ and .cargo/. Anything else is docs, tests
+# or build output and only slows the upload down.
+
+.git
+.github
+.githooks
+docs
+tests
+scripts
+book
+book.toml
+target
+node_modules
+web/node_modules
+web/dist
+render.yaml
+Dockerfile
+.dockerignore

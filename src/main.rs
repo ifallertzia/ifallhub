@@ -84,12 +84,13 @@ async fn main() -> std::io::Result<()> {
         return Ok(());
     }
     if let Some(pos) = args.iter().position(|arg| arg == "--web-api") {
-        let addr = args
-            .get(pos + 1)
-            .filter(|value| !value.starts_with('-'))
-            .cloned()
-            .or_else(|| std::env::var("MOVIEBOX_WEB_API_ADDR").ok())
-            .unwrap_or_else(|| "127.0.0.1:8787".to_string());
+        // Managed hosts (Vercel services, Render) inject PORT and reach the
+        // process over the container network, so a bare PORT means "listen on
+        // every interface". Everything else stays on loopback by default.
+        let addr = moviebox_tui::web_api::resolve_listen_addr(
+            args.get(pos + 1).map(String::as_str),
+            |key| std::env::var(key).ok(),
+        );
         moviebox_tui::logging::init();
         moviebox_tui::web_api::run(&addr).await?;
         return Ok(());
@@ -101,7 +102,9 @@ async fn main() -> std::io::Result<()> {
         println!("    moviebox-tui [OPTIONS]\n");
         println!("OPTIONS:");
         println!("    -h, --help           Print help information");
-        println!("    --web-api [ADDR]     Start the local web API (default 127.0.0.1:8787)");
+        println!(
+            "    --web-api [ADDR]     Start the HTTP API (default 127.0.0.1:8787, or 0.0.0.0:$PORT)"
+        );
         println!("    -v, -V, --version    Print version information\n");
         println!("ENVIRONMENT VARIABLES:");
         println!("    MOVIEBOX_LOG            Log level (off, error, warn, info, debug, trace)");
@@ -111,6 +114,7 @@ async fn main() -> std::io::Result<()> {
         println!("    MOVIEBOX_VLC_PATH       Custom vlc binary path");
         println!("    MOVIEBOX_IINA_PATH      Custom iina-cli binary path");
         println!("    MOVIEBOX_FOURKHDHUB_URL Custom 4KHDHub base URL");
+        println!("    MOVIEBOX_WEB_API_ADDR   Listen address for --web-api (falls back to PORT)");
         println!("    MOVIEBOX_WEB_API_TOKEN  Access key for the --web-api HTTP API");
         println!("    MOVIEBOX_WEB_API_RATE_PER_MIN Web API rate limit per client (0 disables)");
         println!("    MOVIEBOX_WEB_LOCAL_PLAYER 0 disables \"Open in VLC\" in the web player");

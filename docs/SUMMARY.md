@@ -16,6 +16,7 @@
 - [Stremio Addons](addons-mode.md)
 - [Live TV & IPTV](tv-mode.md)
 - [Web Player Deployment](web-deployment.md)
+- [Vercel Deployment](vercel-deployment.md)
 
 # Architecture & Internals
 
