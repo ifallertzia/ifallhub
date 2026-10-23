@@ -28,18 +28,28 @@ artifacts the root `Dockerfile` does.
 
 ## Configuration
 
-`vercel.json` is deliberately almost empty:
-
 ```json
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json"
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "app": {
+      "root": ".",
+      "runtime": "container",
+      "entrypoint": "Dockerfile.vercel"
+    }
+  },
+  "rewrites": [
+    { "source": "/(.*)", "destination": { "service": "app" } }
+  ]
 }
 ```
 
-Vercel detects `Dockerfile.vercel` at the project root and adds the routing
-rewrite itself. Do **not** reintroduce a `services` block with a `rust` runtime:
-a project that declares `services` takes over routing, and the Rust runtime
-cannot host this engine.
+One service, built from `Dockerfile.vercel`, published by the single catch-all
+rewrite. Declaring the service explicitly (instead of relying on auto-detection)
+keeps a project-level framework preset from taking over the build, and a
+container service needs no binding. Do **not** reintroduce a service on the
+`rust` runtime: that runtime compiles a `vercel_runtime` Function, which cannot
+host this long-running engine, and Rust/Go services cannot hold bindings.
 
 `Dockerfile.vercel` differs from the Render `Dockerfile` in three documented ways,
 and `web/tests/vercel-config.test.js` keeps the rest of the two files identical:

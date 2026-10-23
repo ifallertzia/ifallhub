@@ -67,13 +67,23 @@ test('the Vercel image builds the same stack as the Render image', () => {
   assert.deepEqual(vercel, render);
 });
 
-test('vercel.json stays out of the way of container auto-detection', () => {
+test('vercel.json declares exactly one container service and publishes it', () => {
   const config = JSON.parse(read('vercel.json'));
-  // Vercel detects Dockerfile.vercel and adds the routing rewrite itself. A
-  // `services` block would take over routing and is what broke the earlier
-  // Node + Rust experiment.
-  assert.equal(config.services, undefined);
-  assert.equal(config.rewrites, undefined);
+  const services = config.services ?? {};
+  // A single service running the Dockerfile.vercel image. The earlier failure
+  // was a second service on the `rust` runtime: that runtime builds a
+  // vercel_runtime Function, which cannot host a long-running HTTP server.
+  assert.deepEqual(Object.keys(services), ['app']);
+  assert.equal(services.app.root, '.');
+  assert.equal(services.app.runtime, 'container');
+  assert.equal(services.app.entrypoint, 'Dockerfile.vercel');
+  assert.equal(services.app.bindings, undefined, 'a container needs no bindings');
+
+  // Container images require explicit routing in services mode: a service is
+  // internal until a rewrite targets it.
+  assert.deepEqual(config.rewrites, [
+    { source: '/(.*)', destination: { service: 'app' } },
+  ]);
   assert.equal(config.functions, undefined);
 });
 
