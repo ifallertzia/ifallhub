@@ -1,487 +1,697 @@
-// Title details: IMDb-style sheet with official rating, credits, episodes,
-// stream list, personal rating and a "More like this" rail.
+// Sidify-V2 `MediaDetailView` (`MovieWatchSection`, `SeasonTabsSection`, `EpisodeRow`,
+// and `More like this` Shelf) wired to Ifallhub's `/api/details`, `/api/streams`,
+// `/api/related`, and `/api/library`.
 
 import * as api from '../lib/api.js';
-import * as library from '../lib/library.js';
-import { cardHtml, errorStateHtml, posterFallbackHtml, ratingRingHtml, rowHtml, spinnerHtml } from '../ui/components.js';
 import {
+  SERVER_ROTATION,
   displayUiText,
   escapeHtml,
+  formatClock,
   formatRating,
   formatRuntime,
-  normaliseRating,
-  prettySize,
+  isSeriesItem,
+  itemId,
+  itemPoster,
+  itemProvider,
+  itemTitle,
+  itemYear,
   providerLabel,
 } from '../lib/format.js';
-import { rankRelated, similarByMeta } from '../lib/recommend.js';
-import { app, cardMeta, ensureMeta, rememberGenres, toast } from '../state.js';
-import { navigate, watchPath } from '../lib/router.js';
-import { buildStreamEntry, downloadRelease } from '../player/engine.js';
+import * as library from '../lib/library.js';
 import {
-  describeOpenResult,
-  loadPlayerSupport,
-  openStreamExternally,
-  playerButtonLabel,
-} from '../ui/vlc-button.js';
+  initialSeasonNumber,
+  itemBackdrop,
+  itemGenres,
+  mediaArt,
+  orderedSeasonNumbers,
+  summariseReleases,
+} from '../lib/media-helpers.js';
+import { rankRelated, similarByMeta } from '../lib/recommend.js';
+import {
+  cacheDetails,
+  cachedDetails,
+  cachedMeta,
+  ensureMeta,
+  setAmbientSeed,
+  state,
+  toast,
+} from '../state.js';
+import {
+  chipsHtml,
+  errorStateHtml,
+  posterCardHtml,
+  sectionHeaderHtml,
+  shelfHtml,
+} from '../ui/components.js';
+import { iconHtml } from '../ui/icons.js';
+import {
+  openBetaPlayerSheet,
+  openQualityPickerSheet,
+  openVlcPickerSheet,
+} from '../ui/sheets.js';
 
-const state = {
-  provider: 'moviebox',
-  id: '',
-  details: null,
-  season: 0,
-  episode: 0,
-  entry: null,
-  request: 0,
-  streamsPromise: null,
-};
+function watchActionsHtml({
+  season = 0,
+  episode = 0,
+  resumeLabel = '',
+  size = 'md',
+} = {}) {
+  const sm = size === 'sm';
+  const primaryCls = sm
+    ? 'inline-flex h-8 items-center gap-1.5 rounded-full bg-primary px-3.5 text-[12.5px] font-semibold text-on-primary transition active:scale-[0.98]'
+    : 'inline-flex h-10 items-center gap-2 rounded-full bg-primary px-5 text-[14px] font-semibold text-on-primary transition active:scale-[0.98]';
+  const secondaryCls = sm
+    ? 'inline-flex h-8 items-center gap-1.5 rounded-full bg-fill-2 px-3 text-[12.5px] font-semibold text-fg transition hover:bg-fill-3 active:scale-[0.98]'
+    : 'inline-flex h-10 items-center gap-2 rounded-full bg-fill-2 px-4 text-[14px] font-semibold text-fg transition hover:bg-fill-3 active:scale-[0.98]';
 
-export async function renderDetails(container, route) {
-  const request = ++state.request;
-  state.provider = route.params.provider;
-  state.id = route.params.id;
-  state.details = null;
-  state.entry = null;
-  state.streamsPromise = null;
+  const dataAttrs = `data-season="${escapeHtml(String(season || 0))}" data-episode="${escapeHtml(String(episode || 0))}"`;
 
-  container.innerHTML = `<div class="page-shell">${spinnerHtml('Loading title…')}</div>`;
-
-  let details;
-  try {
-    details = await api.details({ provider: state.provider, id: state.id });
-  } catch (error) {
-    if (request !== state.request) return;
-    container.innerHTML = `<div class="page-shell">${errorStateHtml({
-      title: 'Could not load this title',
-      message: error?.message || 'The source did not return details.',
-    })}</div>`;
-    container.querySelector('[data-retry]')?.addEventListener('click', () => renderDetails(container, route));
-    return;
-  }
-  if (request !== state.request) return;
-
-  state.details = details;
-  app.details = details;
-  rememberGenres(details);
-  const isSeries = details.media_type === 'series' || (details.seasons || []).length > 0;
-  state.season = isSeries ? Number(details.seasons?.[0]?.number || 1) : 0;
-  state.episode = isSeries ? Number(details.seasons?.[0]?.episodes?.[0]?.number || 1) : 0;
-
-  paint(container);
-  loadStreams();
-  loadRelated(container);
+  return `
+    <div class="flex flex-wrap items-center gap-2">
+      <button type="button" data-action-try-play ${dataAttrs} class="${primaryCls}">
+        ${iconHtml('play', { size: sm ? 12 : 14 })}
+        <span>${escapeHtml(resumeLabel || 'Try Play')}</span>
+        <span class="rounded-full bg-black/15 px-1.5 py-[1px] text-[10px] font-bold tracking-wide uppercase">Beta</span>
+      </button>
+      <button type="button" data-action-vlc ${dataAttrs} class="${secondaryCls}">
+        ${iconHtml('monitorPlay', { size: sm ? 13 : 15 })}
+        <span>Play with VLC</span>
+      </button>
+      <button type="button" data-action-download ${dataAttrs} class="${secondaryCls}">
+        ${iconHtml('download', { size: sm ? 13 : 15 })}
+        <span>Download</span>
+      </button>
+    </div>`;
 }
 
-function paint(container) {
-  const details = state.details;
-  if (!details) return;
-  const provider = state.provider;
-  const id = state.id;
-  const title = details.title || 'Untitled';
-  const poster = details.poster_url || '';
-  const isSeries = details.media_type === 'series' || (details.seasons || []).length > 0;
-  const rating = normaliseRating(details.imdb_rating);
-  const myRating = library.ratingFor(provider, id);
-  const listed = library.isInWatchlist(provider, id);
-  const progress = library.progressFor(provider, id);
-  const genres = details.genres || [];
-  const stars = (details.stars || '')
-    .split(',')
-    .map((name) => name.trim())
-    .filter(Boolean);
-  const seasonOptions = (details.seasons || [])
-    .map(
-      (season) =>
-        `<option value="${Number(season.number)}" ${Number(season.number) === Number(state.season) ? 'selected' : ''}>Season ${Number(season.number)}</option>`,
-    )
-    .join('');
-  const episodes = (details.seasons || []).find((season) => Number(season.number) === Number(state.season))?.episodes || [];
+export async function renderDetails(container, ctx = {}, { autoPlayOnMount = false } = {}) {
+  const provider = decodeURIComponent(ctx.params?.provider || state.provider || 'moviebox');
+  const id = decodeURIComponent(ctx.params?.id || '');
+
+  if (!id) {
+    container.innerHTML = errorStateHtml({ title: 'Title not found', message: 'Missing title identifier.', retry: false });
+    return;
+  }
 
   container.innerHTML = `
-    <div class="page-shell details" data-view="details">
-      <section class="detail-hero">
-        <div class="detail-backdrop">
-          ${poster ? `<img src="${escapeHtml(poster)}" alt="" aria-hidden="true" />` : posterFallbackHtml(title, provider)}
-        </div>
-        <div class="detail-grid">
-          <div class="detail-poster">
-            ${poster ? `<img src="${escapeHtml(poster)}" alt="${escapeHtml(title)} poster" />` : posterFallbackHtml(title, provider)}
-          </div>
-          <div class="detail-main">
-            <p class="kicker">${escapeHtml(providerLabel(provider))} · ${isSeries ? 'SERIES' : 'MOVIE'}</p>
-            <h1 class="detail-title">${escapeHtml(title)}</h1>
-            ${details.tagline ? `<p class="detail-tagline">${escapeHtml(details.tagline)}</p>` : ''}
-            <div class="detail-meta">
-              ${details.year ? `<span class="meta-pill">${escapeHtml(details.year)}</span>` : ''}
-              ${details.duration ? `<span class="meta-pill">${escapeHtml(formatRuntime(details.duration))}</span>` : ''}
-              ${isSeries && details.seasons?.length ? `<span class="meta-pill">${details.seasons.length} Season${details.seasons.length > 1 ? 's' : ''}</span>` : ''}
-              ${details.prints ? `<span class="meta-pill">${escapeHtml(displayUiText(details.prints))}</span>` : ''}
-              ${details.audios ? `<span class="meta-pill">${escapeHtml(displayUiText(details.audios))}</span>` : ''}
-            </div>
-            <div class="detail-scores">
-              ${ratingRingHtml(rating, { label: 'IMDb', size: 'lg' })}
-              <div class="score-copy">
-                <p class="score-line">${rating ? `Official IMDb score ${formatRating(rating)}/10` : 'No official rating reported for this title.'}</p>
-                <p class="score-line muted">Your rating: <strong data-my-rating>${myRating ? `${myRating}/10` : 'not rated'}</strong></p>
-              </div>
-            </div>
-            <div class="detail-actions">
-              <button class="primary-button" type="button" data-play-title>▶ ${progress && progress.position_seconds > 5 ? 'Resume' : 'Play'}</button>
-              <button class="ghost-button vlc-launch" type="button" data-open-vlc title="Play on this computer in VLC, mpv or IINA (H.265/.mkv ke liye)">▶ Open in VLC</button>
-              <button class="ghost-button" type="button" data-watchlist="${listed ? '1' : '0'}">${listed ? '✓ In My List' : '+ My List'}</button>
-              <button class="ghost-button" type="button" data-rate-toggle>★ Rate</button>
-            </div>
-            <div class="rate-panel" hidden>
-              <p class="rate-label">Rate this title (1-10)</p>
-              <div class="rate-buttons">
-                ${Array.from({ length: 10 }, (_, index) => index + 1)
-                  .map(
-                    (value) =>
-                      `<button type="button" class="rate-button ${value === myRating ? 'is-active' : ''}" data-rate="${value}" aria-label="Rate ${value} out of 10">${value}</button>`,
-                  )
-                  .join('')}
-                <button type="button" class="rate-clear" data-rate="0">Clear</button>
-              </div>
-            </div>
-            ${progress ? `<p class="detail-resume">You stopped at ${Math.round(((progress.position_seconds || 0) / Math.max(1, progress.duration_seconds || 1)) * 100)}%${Number(progress.season) > 0 ? ` · S${progress.season} E${progress.episode || 1}` : ''}</p>` : ''}
-            <p class="detail-description">${escapeHtml(details.description || 'No description available for this title.')}</p>
-            ${details.director ? `<p class="detail-credit"><span>Director</span> <a href="/search?q=${encodeURIComponent(details.director)}" data-nav>${escapeHtml(details.director)}</a></p>` : ''}
-            ${stars.length ? `<p class="detail-credit"><span>Cast</span> ${stars.slice(0, 6).map((name) => `<a href="/search?q=${encodeURIComponent(name)}" data-nav>${escapeHtml(name)}</a>`).join(', ')}</p>` : ''}
-            ${genres.length ? `<div class="genre-chips">${genres.map((genre) => `<a class="chip" href="/search?q=${encodeURIComponent(genre)}" data-nav><span>${escapeHtml(genre)}</span></a>`).join('')}</div>` : ''}
+    <div class="fade-up pb-14">
+      <div class="relative -mt-2 min-h-[420px] bg-raised desk:min-h-[480px]">
+        <div class="flex min-h-[420px] items-end gap-6 p-5 desk:min-h-[480px] desk:p-10">
+          <div class="skeleton aspect-[2/3] w-[118px] shrink-0 rounded-[12px] desk:w-[216px]"></div>
+          <div class="flex-1 space-y-3 pb-2">
+            <div class="skeleton h-4 w-28 rounded-full"></div>
+            <div class="skeleton h-10 w-2/3 rounded-lg"></div>
+            <div class="skeleton h-4 w-1/2 rounded"></div>
+            <div class="skeleton h-16 w-full max-w-[540px] rounded-lg"></div>
           </div>
         </div>
-      </section>
-
-      ${
-        isSeries
-          ? `<section class="episode-panel">
-              <header class="panel-head">
-                <h2>Episodes</h2>
-                <label class="field">
-                  <span>Season</span>
-                  <select id="season-select">${seasonOptions}</select>
-                </label>
-              </header>
-              <div class="episode-list">
-                ${episodes.length
-                  ? episodes
-                      .map(
-                        (episode) => `
-                        <article class="episode-row ${Number(episode.number) === Number(state.episode) ? 'is-active' : ''}" data-episode="${Number(episode.number)}">
-                          <span class="episode-number">${Number(episode.number)}</span>
-                          <span class="episode-copy">
-                            <strong>${escapeHtml(episode.title || `Episode ${Number(episode.number)}`)}</strong>
-                            ${episode.overview ? `<small>${escapeHtml(episode.overview)}</small>` : ''}
-                          </span>
-                          <button class="icon-button" type="button" data-play-episode="${Number(episode.number)}" aria-label="Play episode ${Number(episode.number)}">▶</button>
-                        </article>`,
-                      )
-                      .join('')
-                  : '<p class="muted">No episode list from this source.</p>'}
-              </div>
-            </section>`
-          : ''
-      }
-
-      <section class="streams-panel">
-        <header class="panel-head">
-          <div>
-            <h2>Available streams</h2>
-            <p class="muted" id="stream-subtitle">Checking configured sources…</p>
-          </div>
-          <div class="stream-actions">
-            <button class="primary-button" type="button" data-play-title>▶ Play automatically</button>
-            <button class="ghost-button vlc-launch" type="button" data-open-vlc title="Play on this computer in VLC, mpv or IINA (H.265/.mkv ke liye)">▶ Open in VLC</button>
-          </div>
-        </header>
-        <div class="stream-list" id="stream-list">${spinnerHtml('Finding streams…')}</div>
-        <p class="stream-note">Play automatically tries Sakshi → Ritu → Siddharth → the rest. Har link ka apna download button hai.</p>
-      </section>
-
-      <section class="related-panel" id="related-panel">
-        ${rowHtml({ key: 'related', title: 'More like this', hint: 'Similar titles from this source', itemsHtml: '<div class="loading-state"><span class="spinner"></span><span>Finding similar titles…</span></div>' })}
-      </section>
-    </div>`;
-
-  bind(container);
-}
-
-function bind(container) {
-  container.querySelectorAll('[data-play-title]').forEach((button) => {
-    button.addEventListener('click', () => {
-      navigate(watchPath(state.provider, state.id, { season: state.season, episode: state.episode }));
-    });
-  });
-
-  container.querySelectorAll('[data-open-vlc]').forEach((button) => {
-    button.addEventListener('click', () => openInLocalPlayer(button));
-  });
-  applyPlayerLabel(container);
-
-  const watchlistButton = container.querySelector('[data-watchlist]');
-  watchlistButton?.addEventListener('click', async () => {
-    const listed = await library.toggleWatchlist({
-      provider: state.provider,
-      id: state.id,
-      title: state.details?.title,
-      poster_url: state.details?.poster_url || null,
-      year: state.details?.year || null,
-      media_type: state.details?.media_type || 'movie',
-      official_rating: normaliseRating(state.details?.imdb_rating),
-    });
-    watchlistButton.dataset.watchlist = listed ? '1' : '0';
-    watchlistButton.textContent = listed ? '✓ In My List' : '+ My List';
-    toast(listed ? 'Added to My List' : 'Removed from My List', listed ? 'success' : 'info');
-    document.dispatchEvent(new CustomEvent('ifallhub:library-changed'));
-  });
-
-  container.querySelector('[data-rate-toggle]')?.addEventListener('click', () => {
-    const panel = container.querySelector('.rate-panel');
-    if (panel) panel.hidden = !panel.hidden;
-  });
-  container.querySelectorAll('[data-rate]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const value = await library.setRating(
-        {
-          provider: state.provider,
-          id: state.id,
-          title: state.details?.title,
-          poster_url: state.details?.poster_url || null,
-          year: state.details?.year || null,
-        },
-        Number(button.dataset.rate),
-      );
-      const label = container.querySelector('[data-my-rating]');
-      if (label) label.textContent = value ? `${value}/10` : 'not rated';
-      container.querySelectorAll('[data-rate]').forEach((entry) => {
-        entry.classList.toggle('is-active', Number(entry.dataset.rate) === value);
-      });
-      toast(value ? `Rated ${value}/10` : 'Rating cleared', 'success');
-      document.dispatchEvent(new CustomEvent('ifallhub:library-changed'));
-    });
-  });
-
-  container.querySelector('#season-select')?.addEventListener('change', (event) => {
-    state.season = Number(event.target.value);
-    const season = (state.details.seasons || []).find((entry) => Number(entry.number) === state.season);
-    state.episode = Number(season?.episodes?.[0]?.number || 1);
-    paint(container);
-    loadStreams();
-  });
-
-  container.querySelectorAll('[data-play-episode]').forEach((button) => {
-    button.addEventListener('click', () => {
-      state.episode = Number(button.dataset.playEpisode);
-      navigate(watchPath(state.provider, state.id, { season: state.season, episode: state.episode }));
-    });
-  });
-  container.querySelectorAll('[data-episode]').forEach((row) => {
-    row.addEventListener('click', (event) => {
-      if (event.target.closest('[data-play-episode]')) return;
-      state.episode = Number(row.dataset.episode);
-      container.querySelectorAll('[data-episode]').forEach((entry) => entry.classList.toggle('is-active', entry === row));
-      loadStreams();
-    });
-  });
-}
-
-/**
- * Names the "Open in VLC" buttons after the player this engine can actually
- * launch (VLC/mpv/IINA/Android). Left as-is when this deployment cannot launch
- * one: the click then copies the link instead.
- */
-async function applyPlayerLabel(container) {
-  const support = await loadPlayerSupport();
-  if (!support.available) return;
-  const label = playerButtonLabel(support);
-  container.querySelectorAll('.vlc-launch').forEach((button) => {
-    if (button.dataset.release === undefined) button.textContent = `▶ ${label}`;
-  });
-}
-
-/**
- * Opens the selected release (newest list state) in a local player. Waits for
- * the stream list when a load is still in flight, so the button works while
- * the page is still collecting links.
- */
-async function openInLocalPlayer(button) {
-  const previous = button.textContent;
-  button.disabled = true;
-  button.textContent = 'Opening…';
-  try {
-    await state.streamsPromise?.catch(() => {});
-    const entry = state.entry;
-    if (!entry?.streamSetId || !entry.releases.length) {
-      toast('Stream links are still loading. Try again in a moment.', 'info');
-      return;
-    }
-    const index = Number(button.dataset.release ?? 0);
-    const release = entry.releases[Number.isFinite(index) ? index : 0];
-    if (!release) {
-      toast('That link is no longer in the stream list. Refresh and try again.', 'info');
-      return;
-    }
-    const progress = library.progressFor(state.provider, state.id);
-    const result = await openStreamExternally({
-      streamSetId: entry.streamSetId,
-      releaseIndex: release.serverIndex ?? 0,
-      mirrorIndex: 0,
-      resumeSeconds: button.dataset.release === undefined ? progress?.position_seconds || 0 : 0,
-    });
-    const summary = describeOpenResult(result);
-    toast(summary.message, summary.kind);
-  } finally {
-    button.disabled = false;
-    button.textContent = previous;
-  }
-}
-
-async function loadStreams() {
-  const list = document.querySelector('#stream-list');
-  const subtitle = document.querySelector('#stream-subtitle');
-  if (!list) return;
-  list.innerHTML = spinnerHtml('Finding streams…');
-  state.streamsPromise = resolveStreams(list, subtitle);
-  return state.streamsPromise;
-}
-
-async function resolveStreams(list, subtitle) {
-  try {
-    const response = await api.streams({
-      provider: state.provider,
-      id: state.id,
-      season: state.season,
-      episode: state.episode,
-      isSeries: state.details?.media_type === 'series' || (state.details?.seasons || []).length > 0,
-      expectedTitle: state.details?.title || '',
-      expectedYear: state.details?.year || '',
-    });
-    state.entry = buildStreamEntry(state.provider, { id: { provider: state.provider, value: state.id }, title: state.details?.title }, response);
-    const releases = state.entry.releases;
-    if (subtitle) {
-      subtitle.textContent = releases.length
-        ? `${releases.length} stream${releases.length === 1 ? '' : 's'} found — best first`
-        : 'No streams on this source. Play automatically checks the others.';
-    }
-    list.innerHTML = releases.length ? releases.map(streamRowHtml).join('') : '<p class="muted">No links on this source yet.</p>';
-    list.querySelectorAll('[data-stream-play]').forEach((button) => {
-      button.addEventListener('click', () => {
-        navigate(watchPath(state.provider, state.id, { season: state.season, episode: state.episode }));
-      });
-    });
-    list.querySelectorAll('[data-open-vlc]').forEach((button) => {
-      button.addEventListener('click', () => openInLocalPlayer(button));
-    });
-    list.querySelectorAll('[data-download]').forEach((button) => {
-      button.addEventListener('click', async () => {
-        button.disabled = true;
-        try {
-          const filename = await downloadRelease({
-            entry: state.entry,
-            releaseIndex: Number(button.dataset.release),
-            mirrorIndex: Number(button.dataset.mirror || 0),
-          });
-          toast(`Download started: ${filename}`, 'success');
-        } catch (error) {
-          toast(error?.message || 'Download could not start.', 'error');
-        } finally {
-          button.disabled = false;
-        }
-      });
-    });
-  } catch (error) {
-    if (subtitle) subtitle.textContent = 'This source could not be reached. Play automatically tries the others.';
-    list.innerHTML = `<p class="muted">${escapeHtml(displayUiText(error?.message || 'Could not load streams.'))}</p>`;
-  }
-}
-
-function streamRowHtml(release, index) {
-  const mirrors = release.mirrors?.length ? release.mirrors : [{ label: '' }];
-  const fields = [release.codec, release.language, prettySize(release.size_bytes)].filter(Boolean);
-  return `
-    <div class="stream-row">
-      <button class="stream-option" type="button" data-stream-play data-release="${index}">
-        <span class="stream-quality">${escapeHtml(String(release.quality || 'AUTO'))}</span>
-        <span class="stream-main">
-          <span class="stream-name" title="${escapeHtml(displayUiText(release.filename || 'Stream'))}">${escapeHtml(displayUiText(release.filename || 'Stream'))}</span>
-          <span class="stream-sub">${fields.map((field) => escapeHtml(String(field))).join('<span class="dot"></span>') || 'Ready to play'}</span>
-        </span>
-        <span class="stream-source">${escapeHtml(providerLabel(release.provider))}</span>
-      </button>
-      <div class="stream-downloads">
-        <button class="ghost-button small vlc-launch" type="button" data-open-vlc data-release="${index}" title="Play this exact link in VLC, mpv or IINA">▶ VLC</button>
-        ${mirrors
-          .map(
-            (mirror, mirrorIndex) => `
-            <button class="ghost-button small" type="button" data-download data-release="${index}" data-mirror="${mirrorIndex}">
-              ↓ ${escapeHtml(mirrors.length > 1 ? mirror.label || `Link ${mirrorIndex + 1}` : 'Download')}
-            </button>`,
-          )
-          .join('')}
       </div>
     </div>`;
-}
 
-async function loadRelated(container) {
-  const panel = container.querySelector('#related-panel');
-  if (!panel) return;
-  let items = [];
-  let reasons = {};
-  try {
-    const payload = await api.related({ provider: state.provider, id: state.id, limit: 24 });
-    api.markSupport('related', true);
-    items = payload.items || [];
-    reasons = payload.reasons || {};
-  } catch (error) {
-    if (error?.status === 404) api.markSupport('related', false);
+  let details = cachedDetails(provider, id);
+  if (!details) {
+    try {
+      details = await api.details({ provider, id }, { signal: ctx.signal });
+      cacheDetails(provider, id, details);
+    } catch (err) {
+      if (ctx.signal?.aborted) return;
+      container.innerHTML = errorStateHtml({
+        title: 'Couldn’t load this title',
+        message: displayUiText(err.message),
+      });
+      container.querySelector('[data-retry]')?.addEventListener('click', () => {
+        void renderDetails(container, ctx, { autoPlayOnMount });
+      });
+      return;
+    }
   }
-  if (!items.length) {
-    items = similarByMeta(state.details, app.pool, { limit: 18 }).map((entry) => entry.item);
+  if (ctx.signal?.aborted) return;
+
+  const isSeries = isSeriesItem(details);
+  const title = itemTitle(details);
+  const year = itemYear(details);
+  const kind = isSeries ? 'series' : 'movie';
+  setAmbientSeed(title);
+
+  const seasons = Array.isArray(details.seasons) ? details.seasons : [];
+  let selectedSeason = initialSeasonNumber(seasons, ctx.query?.get('season') || ctx.query?.get('s'));
+  let ratingOpen = false;
+  let movieStreamSummary = '';
+  let relatedRanked = [];
+
+  const posterFallback = mediaArt(title, year, kind, 'poster');
+  const backdropFallback = mediaArt(title, year, kind, 'backdrop');
+
+  function heroResumeInfo() {
+    const saved = library.progressFor(provider, id);
+    if (!saved || saved.completed || !(Number(saved.position_seconds) > 5)) {
+      return { season: isSeries ? selectedSeason : 0, episode: isSeries ? 1 : 0, label: 'Try Play' };
+    }
+    if (isSeries && Number(saved.season) > 0) {
+      return {
+        season: Number(saved.season),
+        episode: Math.max(1, Number(saved.episode) || 1),
+        label: `Resume S${saved.season}·E${saved.episode || 1} (${formatClock(saved.position_seconds)})`,
+      };
+    }
+    return {
+      season: 0,
+      episode: 0,
+      label: `Resume ${formatClock(saved.position_seconds)}`,
+    };
   }
-  if (!items.length) {
-    panel.innerHTML = rowHtml({
+
+  function renderSeasonSection() {
+    const seasonNums = orderedSeasonNumbers(seasons);
+    if (!seasonNums.length) {
+      // Fallback single season with 1 episode when provider didn't enumerate episodes
+      return `
+        <section>
+          ${sectionHeaderHtml('Episodes', { subtitle: 'Season 1' })}
+          <div class="rounded-[12px] bg-fill/40 px-3.5 py-3 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div class="text-[14px] font-semibold text-fg">Season 1 · Episode 1</div>
+              <div class="text-[12px] text-fg-2">Stream or open in VLC</div>
+            </div>
+            ${watchActionsHtml({ season: 1, episode: 1, size: 'sm' })}
+          </div>
+        </section>`;
+    }
+
+    const activeSeasonObj =
+      seasons.find((s) => Number(s.season_number) === selectedSeason) || seasons[0];
+    const sNum = Number(activeSeasonObj?.season_number) || selectedSeason;
+    const epTotal = Math.max(
+      1,
+      Number(activeSeasonObj?.episode_count) || (activeSeasonObj?.episodes?.length || 1),
+    );
+    const episodes =
+      Array.isArray(activeSeasonObj?.episodes) && activeSeasonObj.episodes.length
+        ? activeSeasonObj.episodes
+        : Array.from({ length: epTotal }, (_, idx) => ({
+            episode_number: idx + 1,
+            title: `Episode ${idx + 1}`,
+          }));
+
+    const saved = library.progressFor(provider, id);
+
+    return `
+      <section>
+        ${sectionHeaderHtml('Seasons & episodes', {
+          subtitle: `${seasonNums.length} ${seasonNums.length === 1 ? 'season' : 'seasons'}`,
+        })}
+        <div class="px-4 desk:px-0">
+          ${chipsHtml(
+            seasonNums.map((n) => ({ id: String(n), label: `Season ${n}` })),
+            String(sNum),
+            { className: 'mb-4', attrName: 'data-season-tab' },
+          )}
+          <ol class="space-y-2">
+            ${episodes
+              .map((ep, idx) => {
+                const epNum = Number(ep.episode_number ?? ep.episodeNumber ?? idx + 1);
+                const epTitle = ep.title || ep.name || `Episode ${epNum}`;
+                const epDur = formatRuntime(ep.duration || ep.runtime);
+                const isSavedEp =
+                  saved &&
+                  !saved.completed &&
+                  Number(saved.season) === sNum &&
+                  Number(saved.episode) === epNum &&
+                  Number(saved.position_seconds) > 5;
+                const resumeLabel = isSavedEp ? `Resume ${formatClock(saved.position_seconds)}` : '';
+
+                return `
+                  <li class="flex flex-col gap-3 rounded-[12px] bg-fill/40 px-3.5 py-3 transition-colors hover:bg-fill/65 sm:flex-row sm:items-center sm:justify-between">
+                    <div class="flex min-w-0 items-start gap-3">
+                      <div class="mt-0.5 w-7 shrink-0 text-right text-[13px] font-semibold tabular-nums text-fg-3">
+                        ${epNum}
+                      </div>
+                      <div class="min-w-0 flex-1">
+                        <div class="flex flex-wrap items-baseline gap-2">
+                          <span class="truncate text-[14.5px] font-semibold text-fg">${escapeHtml(epTitle)}</span>
+                          ${epDur ? `<span class="text-[12px] text-fg-2 tabular-nums">${escapeHtml(epDur)}</span>` : ''}
+                          ${isSavedEp ? `<span class="rounded-full bg-white/15 px-2 py-0.5 text-[10.5px] font-semibold text-fg">In progress</span>` : ''}
+                        </div>
+                        ${
+                          ep.overview || ep.description
+                            ? `<p class="mt-1 line-clamp-2 text-[12.5px] leading-relaxed text-fg-2">${escapeHtml(ep.overview || ep.description)}</p>`
+                            : ''
+                        }
+                      </div>
+                    </div>
+                    <div class="shrink-0 pl-10 sm:pl-0">
+                      ${watchActionsHtml({ season: sNum, episode: epNum, resumeLabel, size: 'sm' })}
+                    </div>
+                  </li>`;
+              })
+              .join('')}
+          </ol>
+        </div>
+      </section>`;
+  }
+
+  function renderMovieSection() {
+    const resume = heroResumeInfo();
+    return `
+      <section class="rounded-[16px] bg-raised/70 p-4 ring-1 ring-edge desk:p-5">
+        <div class="flex flex-wrap items-center justify-between gap-4">
+          <div class="min-w-0">
+            <div class="truncate text-[15.5px] font-semibold text-fg">
+              ${escapeHtml(title)}${year ? ` (${escapeHtml(year)})` : ''}
+            </div>
+            <div class="mt-0.5 text-[12.5px] text-fg-2" data-stream-summary>
+              ${escapeHtml(movieStreamSummary || `Source: ${providerLabel(provider)} · Multi-server auto-fallback ready`)}
+            </div>
+          </div>
+          ${watchActionsHtml({ season: 0, episode: 0, resumeLabel: resume.label === 'Try Play' ? '' : resume.label, size: 'md' })}
+        </div>
+        <p class="mt-3 text-[12px] leading-relaxed text-fg-2">
+          <strong class="text-fg">Try Play</strong> streams right in your browser with automatic server fallback (${SERVER_ROTATION.slice(0, 3).map(providerLabel).join(' → ')}) and online subtitles. If a 4K/BluRay file uses Dolby/DTS audio, open in <strong class="text-fg">VLC</strong> or <strong class="text-fg">Download</strong>.
+        </p>
+      </section>`;
+  }
+
+  function renderRelatedSection() {
+    if (!relatedRanked.length) return '';
+    return shelfHtml({
       key: 'related',
       title: 'More like this',
-      itemsHtml: '<p class="muted">No similar titles found from this source yet.</p>',
+      subtitle: relatedRanked[0]?.reasons?.[0] || 'Similar titles you might enjoy',
+      itemsHtml: relatedRanked
+        .map((entry) => {
+          const it = entry.item;
+          const p = itemProvider(it);
+          const itemIdVal = itemId(it);
+          const metaEntry = cachedMeta(p, itemIdVal);
+          return posterCardHtml(it, {
+            metaEntry,
+            rating: entry.rating ?? it.imdb_rating ?? metaEntry?.imdb_rating,
+            listed: library.isInWatchlist(p, itemIdVal),
+            progress: library.progressFor(p, itemIdVal),
+            personalRating: library.ratingFor(p, itemIdVal),
+          });
+        })
+        .join(''),
     });
-    return;
   }
 
-  const ranked = rankRelated(items, {
-    reasons,
-    ratings: Object.fromEntries(
-      library.state.ratings.map((entry) => [entry.id, { rating: entry.rating }]),
-    ),
-    watchlist: library.state.watchlist,
-    progress: library.state.progress,
-    limit: 24,
+  function renderPage() {
+    if (ctx.signal?.aborted) return;
+    const poster = itemPoster(details) || posterFallback;
+    const backdrop = itemBackdrop(details) || backdropFallback;
+    const rating = formatRating(details.imdb_rating);
+    const runtime = formatRuntime(details.duration);
+    const genres = itemGenres(details);
+    const listed = library.isInWatchlist(provider, id);
+    const myRating = library.ratingFor(provider, id);
+    const resume = heroResumeInfo();
+
+    const metaBits = [
+      year,
+      isSeries && seasons.length
+        ? `${seasons.length} ${seasons.length === 1 ? 'season' : 'seasons'}`
+        : runtime,
+      Array.isArray(details.prints) && details.prints.length ? details.prints.slice(0, 3).join(' / ') : '',
+      Array.isArray(details.audios) && details.audios.length ? details.audios.slice(0, 2).join(', ') : '',
+    ].filter(Boolean);
+
+    const creditsBits = [
+      details.director ? `Directed by ${details.director}` : '',
+      Array.isArray(details.cast) && details.cast.length ? `Cast: ${details.cast.slice(0, 5).join(', ')}` : '',
+    ].filter(Boolean);
+
+    const browseBase = isSeries ? '/series' : '/movies';
+
+    container.innerHTML = `
+      <div
+        class="fade-up pb-14"
+        data-detail-root
+        data-card
+        data-provider="${escapeHtml(provider)}"
+        data-id="${escapeHtml(id)}"
+        data-title="${escapeHtml(title)}"
+        data-year="${escapeHtml(year || '')}"
+        data-poster="${escapeHtml(itemPoster(details) || '')}"
+        data-type="${kind}"
+        data-rating="${escapeHtml(rating || '')}"
+      >
+        <!-- Full-bleed Backdrop Header -->
+        <div class="relative -mt-2 overflow-hidden bg-raised">
+          <div class="relative min-h-[400px] w-full desk:min-h-[490px]">
+            <img
+              src="${escapeHtml(backdrop)}"
+              data-fallback-src="${escapeHtml(backdropFallback)}"
+              alt=""
+              aria-hidden="true"
+              class="absolute inset-0 h-full w-full object-cover"
+            />
+            <div
+              aria-hidden="true"
+              class="absolute inset-0"
+              style="background: linear-gradient(90deg, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.64) 48%, rgba(0,0,0,0.32) 100%), linear-gradient(180deg, rgba(0,0,0,0.22) 0%, rgba(0,0,0,0.52) 55%, var(--bg) 100%)"
+            ></div>
+
+            <div class="relative flex min-h-[400px] flex-col justify-end gap-6 p-5 text-white desk:min-h-[490px] desk:flex-row desk:items-end desk:gap-8 desk:p-10">
+              <div class="w-[118px] shrink-0 overflow-hidden rounded-[12px] bg-raised shadow-[0_18px_50px_-14px_rgba(0,0,0,0.8)] ring-1 ring-white/15 desk:w-[216px]">
+                <img
+                  src="${escapeHtml(poster)}"
+                  data-fallback-src="${escapeHtml(posterFallback)}"
+                  alt="${escapeHtml(title)}"
+                  class="aspect-[2/3] w-full object-cover"
+                />
+              </div>
+
+              <div class="min-w-0 flex-1">
+                <div class="flex flex-wrap items-center gap-2 text-[11px] font-bold tracking-[0.9px] text-white/80 uppercase">
+                  <span class="rounded-full bg-white/15 px-2.5 py-1 backdrop-blur-md">
+                    ${isSeries ? 'Series' : 'Film'}
+                  </span>
+                  ${
+                    rating
+                      ? `<span class="inline-flex items-center gap-1 text-white">
+                           ${iconHtml('starFilled', { size: 12 })}
+                           ${escapeHtml(rating)}
+                         </span>`
+                      : ''
+                  }
+                  <span class="rounded-full bg-white/10 px-2.5 py-1 text-white/75 backdrop-blur-md">
+                    ${escapeHtml(providerLabel(provider))}
+                  </span>
+                </div>
+
+                <h1 class="mt-2.5 text-[30px] leading-[1.06] font-extrabold tracking-[-0.8px] text-white desk:text-[46px] desk:tracking-[-1.2px]">
+                  ${escapeHtml(title)}
+                </h1>
+
+                ${
+                  details.tagline
+                    ? `<p class="mt-1.5 text-[14.5px] text-white/70 italic">${escapeHtml(details.tagline)}</p>`
+                    : ''
+                }
+
+                ${
+                  metaBits.length
+                    ? `<div class="mt-3 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[13px] font-medium text-white/80">
+                         ${escapeHtml(metaBits.join(' · '))}
+                       </div>`
+                    : ''
+                }
+
+                ${
+                  genres.length
+                    ? `<div class="mt-2 flex flex-wrap gap-1.5 text-[12.5px] text-white/80">
+                         ${genres
+                           .map(
+                             (g) =>
+                               `<a href="${browseBase}?genre=${encodeURIComponent(g)}" data-nav class="rounded-full bg-white/12 px-2.5 py-0.5 transition hover:bg-white/22">${escapeHtml(g)}</a>`,
+                           )
+                           .join('')}
+                       </div>`
+                    : ''
+                }
+
+                ${
+                  details.description
+                    ? `<p class="mt-4 max-w-[680px] text-[14px] leading-relaxed text-white/85 desk:text-[15px]">
+                         ${escapeHtml(displayUiText(details.description))}
+                       </p>`
+                    : ''
+                }
+
+                ${
+                  creditsBits.length
+                    ? `<p class="mt-2.5 max-w-[680px] text-[12.5px] text-white/65">
+                         ${escapeHtml(creditsBits.join(' · '))}
+                       </p>`
+                    : ''
+                }
+
+                <!-- Sidify-V2 Action Pills Row -->
+                <div class="mt-5 flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="button"
+                    data-action-try-play
+                    data-season="${escapeHtml(String(resume.season))}"
+                    data-episode="${escapeHtml(String(resume.episode))}"
+                    class="inline-flex h-11 items-center gap-2 rounded-full bg-white px-6 text-[15px] font-semibold text-black shadow-lg transition active:scale-[0.98]"
+                  >
+                    ${iconHtml('play', { size: 15 })}
+                    <span>${escapeHtml(resume.label)}</span>
+                    <span class="rounded-full bg-black/10 px-1.5 py-[1px] text-[10px] font-bold tracking-wide text-black/75 uppercase">Beta</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    data-action-vlc
+                    data-season="${escapeHtml(String(resume.season))}"
+                    data-episode="${escapeHtml(String(resume.episode))}"
+                    class="inline-flex h-11 items-center gap-2 rounded-full bg-white/16 px-5 text-[15px] font-semibold text-white ring-1 ring-white/20 backdrop-blur-xl transition hover:bg-white/24 active:scale-[0.98]"
+                  >
+                    ${iconHtml('monitorPlay', { size: 16 })}
+                    <span>Play with VLC</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    data-action-download
+                    data-season="${escapeHtml(String(resume.season))}"
+                    data-episode="${escapeHtml(String(resume.episode))}"
+                    class="inline-flex h-11 items-center gap-2 rounded-full bg-white/16 px-5 text-[15px] font-semibold text-white ring-1 ring-white/20 backdrop-blur-xl transition hover:bg-white/24 active:scale-[0.98]"
+                  >
+                    ${iconHtml('download', { size: 16 })}
+                    <span>Download</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    data-watchlist="${listed ? '1' : '0'}"
+                    aria-pressed="${listed ? 'true' : 'false'}"
+                    class="inline-flex h-11 items-center gap-2 rounded-full px-5 text-[15px] font-semibold backdrop-blur-xl transition active:scale-[0.98] ${
+                      listed
+                        ? 'bg-white text-black'
+                        : 'bg-white/16 text-white ring-1 ring-white/20 hover:bg-white/24'
+                    }"
+                  >
+                    ${iconHtml(listed ? 'check' : 'bookmark', { size: 16 })}
+                    <span>${listed ? 'In watchlist' : 'Watchlist'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    data-toggle-rate
+                    class="inline-flex h-11 items-center gap-1.5 rounded-full px-4 text-[14px] font-semibold backdrop-blur-xl transition active:scale-[0.98] ${
+                      myRating
+                        ? 'bg-white text-black'
+                        : 'bg-white/16 text-white ring-1 ring-white/20 hover:bg-white/24'
+                    }"
+                  >
+                    ${iconHtml(myRating ? 'starFilled' : 'star', { size: 15 })}
+                    <span>${myRating ? `Rated ${myRating}/10` : 'Rate'}</span>
+                  </button>
+                </div>
+
+                ${
+                  ratingOpen
+                    ? `<div class="mt-3 inline-flex flex-wrap items-center gap-1 rounded-[14px] bg-black/65 p-2 ring-1 ring-white/20 backdrop-blur-xl">
+                         <span class="px-2 text-[12px] font-medium text-white/75">Your score:</span>
+                         ${Array.from({ length: 10 }, (_, idx) => {
+                           const score = idx + 1;
+                           const on = myRating === score;
+                           return `<button type="button" data-rate-score="${score}" class="h-7 w-7 rounded-full text-[12.5px] font-bold transition ${
+                             on ? 'bg-white text-black' : 'bg-white/12 text-white hover:bg-white/25'
+                           }">${score}</button>`;
+                         }).join('')}
+                         ${
+                           myRating
+                             ? `<button type="button" data-rate-score="0" class="ml-1 rounded-full px-2.5 py-1 text-[12px] font-semibold text-red-300 hover:bg-white/10">Clear</button>`
+                             : ''
+                         }
+                       </div>`
+                    : ''
+                }
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Watch / Seasons Section -->
+        <div class="space-y-9 px-4 pt-6 desk:px-10">
+          ${isSeries ? renderSeasonSection() : renderMovieSection()}
+        </div>
+
+        <!-- More Like This Shelf -->
+        <div class="mt-9" data-related-slot>
+          ${renderRelatedSection()}
+        </div>
+
+        <!-- Back Link -->
+        <div class="mt-9 px-4 desk:px-10">
+          <a
+            href="${browseBase}"
+            data-nav
+            class="inline-flex items-center gap-1 text-[14px] font-semibold text-playing hover:opacity-80"
+          >
+            ← Back to all ${isSeries ? 'series' : 'movies'}
+          </a>
+        </div>
+      </div>`;
+  }
+
+  // Delegated click handler on container
+  container.addEventListener('click', async (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+
+    const seasonBtn = target.closest('[data-season-tab]');
+    if (seasonBtn) {
+      selectedSeason = Number(seasonBtn.dataset.seasonTab) || 1;
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.set('season', String(selectedSeason));
+      window.history.replaceState({}, '', `${nextUrl.pathname}${nextUrl.search}`);
+      renderPage();
+      return;
+    }
+
+    const playBtn = target.closest('[data-action-try-play]');
+    if (playBtn) {
+      event.preventDefault();
+      event.stopPropagation();
+      const s = Number(playBtn.dataset.season) || (isSeries ? selectedSeason : 0);
+      const e = Number(playBtn.dataset.episode) || (isSeries ? 1 : 0);
+      void openBetaPlayerSheet({ provider, id, season: s, episode: e, item: details, details });
+      return;
+    }
+
+    const vlcBtn = target.closest('[data-action-vlc]');
+    if (vlcBtn) {
+      event.preventDefault();
+      event.stopPropagation();
+      const s = Number(vlcBtn.dataset.season) || (isSeries ? selectedSeason : 0);
+      const e = Number(vlcBtn.dataset.episode) || (isSeries ? 1 : 0);
+      void openVlcPickerSheet({ provider, id, season: s, episode: e, item: details, details });
+      return;
+    }
+
+    const dlBtn = target.closest('[data-action-download]');
+    if (dlBtn) {
+      event.preventDefault();
+      event.stopPropagation();
+      const s = Number(dlBtn.dataset.season) || (isSeries ? selectedSeason : 0);
+      const e = Number(dlBtn.dataset.episode) || (isSeries ? 1 : 0);
+      void openQualityPickerSheet({ provider, id, season: s, episode: e, item: details, details });
+      return;
+    }
+
+    if (target.closest('[data-toggle-rate]')) {
+      ratingOpen = !ratingOpen;
+      renderPage();
+      return;
+    }
+
+    const scoreBtn = target.closest('[data-rate-score]');
+    if (scoreBtn) {
+      const score = Number(scoreBtn.dataset.rateScore) || 0;
+      await library.setRating(
+        {
+          provider,
+          id,
+          title,
+          poster_url: itemPoster(details) || null,
+          year: year || null,
+          media_type: kind,
+        },
+        score,
+      );
+      ratingOpen = false;
+      toast(score > 0 ? `Rated ${title} ${score}/10` : 'Rating cleared');
+      renderPage();
+    }
   });
-  panel.innerHTML = rowHtml({
-    key: 'related',
-    title: 'More like this',
-    hint: 'Genres, director aur franchise ke hisaab se',
-    count: `${ranked.length}`,
-    itemsHtml: ranked
-      .map((entry) =>
-        cardHtml(entry.item, {
-          ...cardMeta(entry.item, { provider: state.provider }),
-          reason: entry.reasons[0] || '',
-        }),
+
+  const onSync = () => {
+    if (!ctx.signal?.aborted) renderPage();
+  };
+  const unsubLib = library.subscribe(onSync);
+  window.addEventListener('ifallhub:meta', onSync);
+  ctx.signal?.addEventListener('abort', () => {
+    unsubLib();
+    window.removeEventListener('ifallhub:meta', onSync);
+  });
+
+  renderPage();
+
+  // Background preload 1: Movie stream quality/size summary
+  if (!isSeries) {
+    api
+      .streams(
+        {
+          provider,
+          id,
+          season: 0,
+          episode: 0,
+          isSeries: false,
+          expectedTitle: title,
+          expectedYear: year,
+        },
+        { signal: ctx.signal },
       )
-      .join(''),
-  });
-  panel.querySelectorAll('[data-rail] [data-scroll]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const track = button.closest('[data-rail]').querySelector('[data-track]');
-      track.scrollBy({ left: Number(button.dataset.scroll) * Math.max(320, track.clientWidth * 0.8), behavior: 'smooth' });
+      .then((res) => {
+        if (ctx.signal?.aborted) return;
+        const summary = summariseReleases(res?.releases || []);
+        if (summary) {
+          movieStreamSummary = `${providerLabel(provider)} · ${summary}`;
+          const el = container.querySelector('[data-stream-summary]');
+          if (el) el.textContent = movieStreamSummary;
+        }
+      })
+      .catch(() => {});
+  }
+
+  // Background preload 2: Related titles (`More like this`)
+  api
+    .related({ provider, id, limit: 18 }, { signal: ctx.signal })
+    .then(async (res) => {
+      if (ctx.signal?.aborted) return;
+      let items = res?.items || [];
+      let reasons = res?.reasons || {};
+      if (!items.length && state.collections?.rows) {
+        const pool = state.collections.rows.flatMap((r) => r.items || []);
+        const sim = similarByMeta(details, pool, { limit: 12 });
+        items = sim.map((s) => s.item);
+        reasons = Object.fromEntries(sim.map((s) => [itemId(s.item), s.reasons]));
+      }
+      if (!items.length) return;
+      const ratingMap = Object.fromEntries(
+        library.state.ratings.map((r) => [r.id, r.rating]),
+      );
+      relatedRanked = rankRelated(items, {
+        reasons,
+        ratings: ratingMap,
+        watchlist: library.state.watchlist,
+        progress: library.state.progress,
+      });
+      const slot = container.querySelector('[data-related-slot]');
+      if (slot) slot.innerHTML = renderRelatedSection();
+      await ensureMeta(items.slice(0, 18));
+    })
+    .catch(() => {});
+
+  // If navigated via `/watch/:provider/:id?s=&e=`, open the player sheet automatically!
+  if (autoPlayOnMount) {
+    const reqS = Number(ctx.query?.get('s') || ctx.query?.get('season')) || (isSeries ? selectedSeason : 0);
+    const reqE = Number(ctx.query?.get('e') || ctx.query?.get('episode')) || (isSeries ? 1 : 0);
+    void openBetaPlayerSheet({
+      provider,
+      id,
+      season: reqS,
+      episode: reqE,
+      item: details,
+      details,
     });
-  });
-  ensureMeta(ranked.map((entry) => entry.item), { provider: state.provider });
+  }
 }
 
-export function currentDetails() {
-  return state.details;
-}
-
-export function detailsTarget() {
-  return { provider: state.provider, id: state.id, title: state.details?.title || state.id };
+export async function renderWatch(container, ctx = {}) {
+  return renderDetails(container, ctx, { autoPlayOnMount: true });
 }

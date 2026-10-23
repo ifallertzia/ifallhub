@@ -1,127 +1,189 @@
-// Tracker: watch stats, resume list and rating history.
+// Sidify-V2 Watch History, Continue Watching & Stats view (`/tracker` & `/history`)
+// wired live to Ifallhub's `/api/library` (`progress`, `ratings`, `watchlist`, `clear`).
 
-import * as library from '../lib/library.js';
-import { emptyStateHtml, progressRowHtml } from '../ui/components.js';
 import { escapeHtml, relativeTime } from '../lib/format.js';
-import { continueWatching, libraryStats } from '../lib/recommend.js';
+import * as library from '../lib/library.js';
+import {
+  continueWatching,
+  isFinished,
+  libraryStats,
+} from '../lib/recommend.js';
+import { setAmbientSeed, toast } from '../state.js';
+import {
+  emptyStateHtml,
+  pageTitleHtml,
+  posterCardHtml,
+  progressRowHtml,
+  sectionHeaderHtml,
+  shelfHtml,
+} from '../ui/components.js';
+import { iconHtml } from '../ui/icons.js';
 
-export async function renderTracker(container) {
-  paint(container);
-}
+export async function renderTracker(container, ctx = {}) {
+  setAmbientSeed('History');
 
-function paint(container) {
-  const stats = libraryStats(library.state);
-  const resume = continueWatching(library.state.progress, { limit: 50 });
-  const finished = library.state.progress
-    .filter((entry) => entry.completed)
-    .sort((a, b) => (Number(b.updated_at) || 0) - (Number(a.updated_at) || 0));
+  function render() {
+    if (ctx.signal?.aborted) return;
+    const stats = libraryStats(library.state);
+    const inProgress = continueWatching(library.state.progress || [], { limit: 25 });
+    const finished = (library.state.progress || []).filter((entry) => isFinished(entry));
 
-  container.innerHTML = `
-    <div class="page-shell tracker" data-view="tracker">
-      <header class="page-head">
-        <div>
-          <p class="kicker">MOVIE TRACKER</p>
-          <h1 class="page-title">What you've watched</h1>
-          <p class="muted">${library.state.mode === 'server' ? 'Live from the engine — har device pe same library.' : 'Stored on this device (engine library unavailable).'}</p>
-        </div>
-      </header>
+    container.innerHTML = `
+      <div class="fade-up space-y-9 pb-14">
+        ${pageTitleHtml('History', {
+          subtitle: stats.last_watched
+            ? `Last watched ${relativeTime(stats.last_watched)}`
+            : 'Continue watching, completed titles & viewing stats',
+        })}
 
-      <section class="stat-grid">
-        ${statCard('Hours watched', stats.hours, `${stats.started} titles started`)}
-        ${statCard('Finished', stats.finished, `${stats.in_progress} in progress`)}
-        ${statCard('Episodes', stats.episodes, 'tracked episodes')}
-        ${statCard('My List', stats.watchlist_count, 'saved titles')}
-        ${statCard('Average rating', stats.average_rating ? `${stats.average_rating}/10` : '–', `${stats.rated_count} rated`)}
-        ${statCard('Last watched', stats.last_watched ? relativeTime(stats.last_watched) : '–', 'most recent session')}
-      </section>
+        <!-- Sidify-V2 ReplayCard Stats Banner -->
+        <section class="px-4 desk:px-8">
+          <div class="relative overflow-hidden rounded-[18px] bg-gradient-to-br from-[#201218] via-[#171822] to-[#0f1722] p-5 text-white ring-1 ring-white/10">
+            <div class="t-eyebrow text-white/55">Viewing Replay</div>
+            <div class="mt-1 text-[20px] font-bold tracking-[-0.4px]">
+              ${
+                stats.hours > 0
+                  ? `${stats.hours} ${stats.hours === 1 ? 'hour' : 'hours'} streamed across ${stats.finished + stats.in_progress} titles`
+                  : 'Your personal watch activity'
+              }
+            </div>
+            <div class="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
+              <div class="rounded-[12px] bg-white/8 px-3.5 py-2.5 backdrop-blur-md">
+                <div class="text-[22px] font-extrabold tabular-nums">${stats.in_progress}</div>
+                <div class="text-[11.5px] text-white/65">In progress</div>
+              </div>
+              <div class="rounded-[12px] bg-white/8 px-3.5 py-2.5 backdrop-blur-md">
+                <div class="text-[22px] font-extrabold tabular-nums">${stats.finished}</div>
+                <div class="text-[11.5px] text-white/65">Finished</div>
+              </div>
+              <div class="rounded-[12px] bg-white/8 px-3.5 py-2.5 backdrop-blur-md">
+                <div class="text-[22px] font-extrabold tabular-nums">${stats.hours}h</div>
+                <div class="text-[11.5px] text-white/65">Watch time</div>
+              </div>
+              <div class="rounded-[12px] bg-white/8 px-3.5 py-2.5 backdrop-blur-md">
+                <div class="text-[22px] font-extrabold tabular-nums">${stats.watchlist_count}</div>
+                <div class="text-[11.5px] text-white/65">Watchlist</div>
+              </div>
+              <div class="rounded-[12px] bg-white/8 px-3.5 py-2.5 backdrop-blur-md">
+                <div class="text-[22px] font-extrabold tabular-nums">${stats.average_rating ?? '–'}</div>
+                <div class="text-[11.5px] text-white/65">Avg rating</div>
+              </div>
+            </div>
+          </div>
+        </section>
 
-      <section class="tracker-section">
-        <header class="panel-head">
-          <h2>Continue Watching</h2>
-          <p class="muted">Progress ke hisaab se — wahin se resume hoga</p>
-        </header>
-        ${
-          resume.length
-            ? `<div class="progress-list">${resume.map((entry, index) => progressRowHtml(entry, { index })).join('')}</div>`
-            : emptyStateHtml({ title: 'Nothing in progress', message: 'Koi title play karo, progress yahan automatically aa jayega.' })
-        }
-      </section>
+        <!-- Continue Watching -->
+        <section>
+          ${sectionHeaderHtml('Continue watching', {
+            subtitle: inProgress.length ? `${inProgress.length} active` : '',
+          })}
+          ${
+            inProgress.length
+              ? `<div class="space-y-2 px-4 desk:px-8">
+                   ${inProgress.map((entry, idx) => progressRowHtml(entry, { index: idx })).join('')}
+                 </div>`
+              : emptyStateHtml({
+                  icon: 'clock',
+                  title: 'Nothing in progress',
+                  message: 'Movies and episodes you start watching will appear here with automatic resume points.',
+                  action: `<a href="/movies" data-nav class="inline-flex h-10 items-center rounded-full bg-primary px-5 text-[14px] font-semibold text-on-primary">Explore movies</a>`,
+                })
+          }
+        </section>
 
-      <section class="tracker-section">
-        <header class="panel-head">
-          <h2>Finished</h2>
-          <p class="muted">Completed titles</p>
-        </header>
+        <!-- Finished Titles Shelf -->
         ${
           finished.length
-            ? `<div class="progress-list">${finished
-                .map((entry, index) =>
-                  progressRowHtml({ ...entry, position_seconds: entry.duration_seconds || entry.position_seconds }, { index }),
-                )
-                .join('')}</div>`
-            : '<p class="muted">Abhi tak kuch complete nahi hua.</p>'
-        }
-      </section>
-
-      ${
-        library.state.ratings.length
-          ? `<section class="tracker-section">
-              <header class="panel-head"><h2>Rated by you</h2></header>
-              <div class="rating-table">
-                ${library.state.ratings
-                  .slice()
-                  .sort((a, b) => Number(b.rating) - Number(a.rating))
-                  .map(
-                    (entry) => `
-                    <article class="rating-row" data-card data-provider="${escapeHtml(entry.provider)}" data-id="${escapeHtml(entry.id)}" data-title="${escapeHtml(entry.title)}" tabindex="0" role="link">
-                      <span class="rating-value">${escapeHtml(String(entry.rating))}<small>/10</small></span>
-                      <span class="rating-copy"><strong>${escapeHtml(entry.title)}</strong><small>${escapeHtml(relativeTime(entry.updated_at))}</small></span>
-                    </article>`,
+            ? shelfHtml({
+                key: 'finished',
+                title: 'Completed',
+                subtitle: `${finished.length} ${finished.length === 1 ? 'title' : 'titles'} finished`,
+                itemsHtml: finished
+                  .map((entry) =>
+                    posterCardHtml(
+                      {
+                        id: { provider: entry.provider, value: entry.id },
+                        title: entry.title,
+                        year: entry.year,
+                        poster_url: entry.poster_url,
+                        media_type: entry.media_type || 'movie',
+                      },
+                      {
+                        progress: { ...entry, completed: true },
+                        listed: library.isInWatchlist(entry.provider, entry.id),
+                        personalRating: library.ratingFor(entry.provider, entry.id),
+                      },
+                    ),
                   )
-                  .join('')}
-              </div>
-            </section>`
-          : ''
-      }
+                  .join(''),
+              })
+            : ''
+        }
 
-      <section class="tracker-section danger-zone">
-        <header class="panel-head">
-          <h2>Reset</h2>
-          <p class="muted">Library data delete karo</p>
-        </header>
-        <div class="danger-actions">
-          <button class="ghost-button" type="button" data-clear="progress">Clear watch progress</button>
-          <button class="ghost-button" type="button" data-clear="watchlist">Clear My List</button>
-          <button class="ghost-button" type="button" data-clear="ratings">Clear ratings</button>
-          <button class="danger-button" type="button" data-clear="all">Delete everything</button>
-        </div>
-      </section>
-    </div>`;
+        <!-- Sidify-V2 iOS Settings Group for Library Maintenance -->
+        ${
+          stats.in_progress || stats.finished || stats.watchlist_count || stats.rated_count
+            ? `<section class="max-w-[680px] px-4 desk:px-8">
+                 <div class="t-eyebrow mb-2 px-1 text-fg-2">Library Data</div>
+                 <div class="overflow-hidden rounded-[14px] bg-raised ring-1 ring-edge">
+                   <div class="flex min-h-[48px] items-center justify-between gap-3 px-4 py-2.5 hairline-b">
+                     <div>
+                       <div class="text-[14.5px] font-medium text-fg">Watch history &amp; resume points</div>
+                       <div class="text-[12px] text-fg-2">${escapeHtml(String(library.state.progress.length))} saved entries</div>
+                     </div>
+                     <button type="button" data-clear-lib="progress" class="text-[13.5px] font-semibold text-danger hover:opacity-80">Clear</button>
+                   </div>
+                   <div class="flex min-h-[48px] items-center justify-between gap-3 px-4 py-2.5">
+                     <div>
+                       <div class="text-[14.5px] font-medium text-fg">Reset entire library</div>
+                       <div class="text-[12px] text-fg-2">Clears watchlist, watch progress, and personal ratings</div>
+                     </div>
+                     <button type="button" data-clear-lib="all" class="inline-flex items-center gap-1 text-[13.5px] font-semibold text-danger hover:opacity-80">
+                       ${iconHtml('trash', { size: 14 })}
+                       <span>Reset all</span>
+                     </button>
+                   </div>
+                 </div>
+               </section>`
+            : ''
+        }
+      </div>`;
+  }
 
-  container.querySelectorAll('[data-clear]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      await library.clear(button.dataset.clear);
-      paint(container);
-    });
-  });
-  container.querySelectorAll('[data-clear-progress]').forEach((button) => {
-    button.addEventListener('click', async (event) => {
+  container.addEventListener('click', async (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+
+    const clearProgressBtn = target.closest('[data-clear-progress]');
+    if (clearProgressBtn) {
+      event.preventDefault();
       event.stopPropagation();
-      const row = button.closest('[data-card]');
-      await library.updateProgress(
-        { provider: row.dataset.provider, id: row.dataset.id, title: row.dataset.title },
-        { remove: true },
-      );
-      paint(container);
-    });
-  });
-}
+      const row = clearProgressBtn.closest('[data-card]');
+      if (row) {
+        await library.updateProgress(
+          {
+            provider: row.dataset.provider,
+            id: row.dataset.id,
+            title: row.dataset.title || 'Title',
+          },
+          { remove: true },
+        );
+        toast('Removed from Continue watching');
+      }
+      return;
+    }
 
-function statCard(label, value, hint) {
-  return `
-    <article class="stat-card">
-      <span class="stat-label">${escapeHtml(label)}</span>
-      <span class="stat-value">${escapeHtml(String(value ?? '–'))}</span>
-      <span class="stat-hint">${escapeHtml(hint || '')}</span>
-    </article>`;
+    const clearLibBtn = target.closest('[data-clear-lib]');
+    if (clearLibBtn) {
+      const scope = clearLibBtn.dataset.clearLib || 'all';
+      await library.clear(scope);
+      toast(scope === 'all' ? 'Library reset' : 'Watch history cleared');
+      render();
+    }
+  });
+
+  const unsub = library.subscribe(() => render());
+  ctx.signal?.addEventListener('abort', () => unsub());
+
+  render();
 }
