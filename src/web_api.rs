@@ -3063,22 +3063,20 @@ async fn resolve_source(
 mod tests {
     use super::*;
 
-    fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let pairs: Vec<(String, String)> = pairs
-            .iter()
-            .map(|(key, value)| (key.to_string(), value.to_string()))
-            .collect();
+    // Owned input on purpose: returning `impl Fn` from a borrowed slice would
+    // capture the slice lifetime under Rust 2024 and outlive the temporary.
+    fn env_of(pairs: Vec<(&'static str, &'static str)>) -> impl Fn(&str) -> Option<String> {
         move |key: &str| {
             pairs
                 .iter()
-                .find(|(name, _)| name.as_str() == key)
-                .map(|(_, value)| value.clone())
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value).to_string())
         }
     }
 
     #[test]
     fn test_web_api_addr_prefers_explicit_argument() {
-        let env = env_of(&[
+        let env = env_of(vec![
             ("MOVIEBOX_WEB_API_ADDR", "127.0.0.1:9000"),
             ("PORT", "8080"),
         ]);
@@ -3090,7 +3088,7 @@ mod tests {
 
     #[test]
     fn test_web_api_addr_uses_configured_address_before_port() {
-        let env = env_of(&[
+        let env = env_of(vec![
             ("MOVIEBOX_WEB_API_ADDR", "127.0.0.1:9000"),
             ("PORT", "8080"),
         ]);
@@ -3101,21 +3099,21 @@ mod tests {
     fn test_web_api_addr_binds_all_interfaces_for_managed_port() {
         // Vercel/Render services inject PORT and reach the process over the
         // container network, so the listener must not stay on loopback.
-        let env = env_of(&[("PORT", "3000")]);
+        let env = env_of(vec![("PORT", "3000")]);
         assert_eq!(resolve_listen_addr(None, env), "0.0.0.0:3000");
         // An empty or malformed PORT must never widen the listener.
         for raw in ["", "   ", "not-a-port", "127.0.0.1:3000", "70000"] {
-            let env = env_of(&[("PORT", raw)]);
+            let env = env_of(vec![("PORT", raw)]);
             assert_eq!(resolve_listen_addr(None, env), DEFAULT_LISTEN_ADDR);
         }
     }
 
     #[test]
     fn test_web_api_addr_falls_back_to_loopback() {
-        let env = env_of(&[]);
+        let env = env_of(Vec::new());
         assert_eq!(resolve_listen_addr(None, env), "127.0.0.1:8787");
         assert_eq!(
-            resolve_listen_addr(Some("   "), env_of(&[("PORT", "3000")])),
+            resolve_listen_addr(Some("   "), env_of(vec![("PORT", "3000")])),
             "0.0.0.0:3000"
         );
     }
