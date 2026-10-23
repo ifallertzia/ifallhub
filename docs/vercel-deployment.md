@@ -1,163 +1,141 @@
-# Vercel Deployment (services)
+# Vercel Deployment
 
-The web player deploys to Vercel as a **project with two services**: a public
-Node service that serves the built frontend and proxies `/api/*`, and an
-internal Rust service that runs the engine (`moviebox-tui --web-api`).
+The web player deploys to Vercel as **one container-image Function**: the same
+Docker stack used for Render, built by Vercel from `Dockerfile.vercel` at the
+repository root. Node serves the built frontend on `$PORT` and reverse-proxies
+`/api/*` to the headless Rust engine inside the same container, so the browser
+always talks to a single origin.
 
 ```
-browser ──► site  (public, node)          0.0.0.0:$PORT (Vercel assigns)
-              │  serves web/dist, SPA fallback, rate limits, streaming proxy
-              └──► /api/*  ──►  api  (internal, rust)   $PORT
-                                 moviebox-tui --web-api
+browser ──► Vercel route ──► container (Dockerfile.vercel)
+                              ├─ node deploy/server.mjs      :80 (or $PORT)
+                              └─ moviebox-tui --web-api      127.0.0.1:8787
 ```
 
-The browser only ever talks to one origin, exactly like the Docker/Render
-deployment, so there is no CORS, the access-key cookie keeps working, and
-`/api/media/*` keeps streaming ranges through a proxy that never buffers video.
+## Why a container, not a Rust service
 
-## `vercel.json`
+Vercel's `rust` runtime runs a **Function** built from the `vercel_runtime`
+crate - one request in, one response out. This project's engine is a long-lived
+HTTP server, and Vercel also does not support service bindings for services on
+the Go or Rust runtime. The earlier two-service layout (Node `site` + Rust
+`api` with an `API_URL` binding) therefore could not work: even after the build
+was fixed, there was no supported way to run or reach the engine.
+
+The container runtime has none of those limits: it runs any OCI image, listens
+on a port, and supports bindings. That is exactly the deployment shape this
+repository already used for Render, so `Dockerfile.vercel` builds the same two
+artifacts the root `Dockerfile` does.
+
+## Configuration
 
 ```json
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "services": {
-    "site": {
+    "app": {
       "root": ".",
-      "runtime": "node",
-      "installCommand": "sh deploy/vercel-site-install.sh",
-      "buildCommand": "sh deploy/vercel-site-build.sh",
-      "entrypoint": "deploy/vercel-app.sh",
-      "bindings": [
-        { "type": "service", "service": "api", "format": "url", "env": "API_URL" }
-      ]
-    },
-    "api": {
-      "root": ".",
-      "runtime": "rust",
-      "buildCommand": "sh deploy/vercel-api-build.sh",
-      "entrypoint": "deploy/vercel-api.sh"
+      "runtime": "container",
+      "entrypoint": "Dockerfile.vercel"
     }
   },
   "rewrites": [
-    { "source": "/(.*)", "destination": { "service": "site" } }
+    { "source": "/(.*)", "destination": { "service": "app" } }
   ]
 }
 ```
 
-- **`site`** is the only service with public traffic (the catch-all rewrite).
-- Build steps are scripts, not inline shell: `deploy/vercel-site-install.sh`,
-  `deploy/vercel-site-build.sh` and `deploy/vercel-api-build.sh` resolve their
-  own repository root from `$0` and then `cd` where they need to be. `npm ci` is
-  run **inside** `web/`; announcing the working directory in the log, this
-  avoids `npm --prefix web`, which Vercel's build sandbox resolved from the
-  wrong directory and which failed with npm's "can only install with an
-  existing package-lock.json" (EUSAGE) error even though the lockfile is
-  committed. The install script falls back to `npm install` when a stripped
-  checkout has no lockfile, and the API build script installs the Rust
-  toolchain itself if the runtime image ships without `cargo`.
-- **`api`** is internal: it has no rewrite and is reachable only through the
-  `API_URL` binding declared on `site`.
-- The binding injects the API's internal base URL into `site` at runtime;
-  `deploy/vercel-app.sh` refuses to start when neither `API_URL` nor
-  `MOVIEBOX_API_TARGET` is present, so a broken binding fails loudly instead of
-  silently proxying to loopback.
-- `deploy/server.mjs` reads `MOVIEBOX_API_TARGET` first (manual override) and
-  `API_URL` second (the binding), normalises a trailing slash, and never spawns
-  a child engine when an external target is configured.
-- `deploy/vercel-api.sh` runs `moviebox-tui --web-api`. The engine resolves its
-  listen address as `--web-api ADDR` → `MOVIEBOX_WEB_API_ADDR` → `PORT`
-  (`0.0.0.0:$PORT`) → `127.0.0.1:8787`, so a managed host that injects `PORT`
-  is reachable over the container network and a local run stays on loopback.
+One service, built from `Dockerfile.vercel`, published by the single catch-all
+rewrite. Declaring the service explicitly (instead of relying on auto-detection)
+keeps a project-level framework preset from taking over the build, and a
+container service needs no binding. Do **not** reintroduce a service on the
+`rust` runtime: that runtime compiles a `vercel_runtime` Function, which cannot
+host this long-running engine, and Rust/Go services cannot hold bindings.
+
+`Dockerfile.vercel` differs from the Render `Dockerfile` in three documented ways,
+and `web/tests/vercel-config.test.js` keeps the rest of the two files identical:
+
+| Difference | Why |
+| --- | --- |
+| `ENV PORT=80` + `EXPOSE 80` | Vercel sends container traffic to port 80 unless `PORT` is set in project settings |
+| runs as root (no `USER node`) | binding port 80 inside the container needs privileges |
+| `MOVIEBOX_DATA_DIR`/`CONFIG_DIR` under `/tmp` | the container filesystem is read-only, `/tmp` is the writable scratch space |
+| thin LTO + 16 codegen units | keeps the Rust build inside a two-core builder's budget while `Cargo.toml` keeps fat LTO for local/CI |
 
 ## Environment variables
 
-Set these on the Vercel project (all services inherit them):
+Set these on the Vercel project:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `MOVIEBOX_WEB_API_TOKEN` | unset | Shared access key. When set, the app asks for it once and stores it in the browser. |
-| `MOVIEBOX_WEB_RATE_LIMIT` | `300` | JSON API requests/minute/client at the `site` edge. |
-| `MOVIEBOX_WEB_MEDIA_RATE_LIMIT` | `1200` | `/api/media/*` requests/minute/client. |
+| `PORT` | `80` | Only needed if your plan forbids port 80; the image and server follow it. |
 | `MOVIEBOX_LOG` | `warn` | Engine log level (`off`…`trace`). |
-| `MOVIEBOX_DATA_DIR` | `/tmp/ifallhub/data` | Library, caches, resume points. |
-| `MOVIEBOX_CONFIG_DIR` | `/tmp/ifallhub/config` | Config and favorites. |
 | `MOVIEBOX_FOURKHDHUB_URL` | built-in | Custom 4KHDHub base URL. |
 | `MOVIEBOX_WYZIE_KEY` | unset | Optional key for public subtitle search. |
 
-`API_URL` is **not** set by hand: Vercel injects it from the binding. Do not set
-`MOVIEBOX_WEB_API_TARGET` in production either unless you deliberately point the
-frontend at another backend (that variable overrides the binding).
+`MOVIEBOX_API_TARGET` / `API_URL` remain supported by `deploy/server.mjs` if you
+ever want the frontend container to proxy to an engine hosted elsewhere (Render,
+a VPS). Without them the server starts the bundled engine on loopback.
 
 ## Deploy
 
-1. Import the repository in Vercel. `vercel.json` is detected automatically;
-   keep the project **root** at the repository root.
-2. Add the environment variables above for Production (and Preview if you want
-   previews to work).
-3. Deploy. Both services build independently: the `site` service runs
-   `npm ci`/`npm run build` inside `web/`, and the `api` service compiles the
-   engine with `cargo build --release --locked`.
-4. Open the deployment URL. `/api/health` must answer
-   `{"engine":"MovieBox-Tui","status":"ok","version":"0.1.27"}`.
+1. Import the repository in Vercel and keep the project root at the repository
+   root. Container detection needs `Dockerfile.vercel` to be uploaded, which
+   `.vercelignore` guarantees (`/Dockerfile` is excluded, `!Dockerfile.vercel`
+   re-includes the Vercel one).
+2. Add the environment variables above.
+3. Deploy. The build log shows the Vite build, the `cargo build --release`
+   stage, and then `MovieBox-Tui web API listening on http://127.0.0.1:8787`
+   once traffic starts.
+4. Check the deployment:
 
-The build log should show `[site] installing in /vercel/path0/web` followed by
-`[site] web/dist ready`, then `[api] engine built: moviebox-tui 0.1.27`. Those
-markers come from the build scripts and make a failed deploy diagnosable from
-its log alone.
+   ```bash
+   curl -s https://<project>.vercel.app/api/health
+   # {"engine":"MovieBox-Tui","status":"ok",...}
 
-Verify a deployment from a machine with the repository checked out:
+   node deploy/smoke.mjs --base https://<project>.vercel.app --token <key> --real
+   ```
 
-```bash
-node deploy/smoke.mjs --base https://<project>.vercel.app --token <key> --real
-```
+   `--real` walks search → streams → play and pulls the first kilobyte of real
+   media through the proxy, which is what catches provider outages.
 
-`--real` walks search → streams → play and pulls the first kilobyte of real
-media through the proxy, which is the check that catches provider outages.
+The same image is built and smoke-tested in CI (`image` job in
+`.github/workflows/web-deploy.yml`), so a broken container fails the pull
+request before it reaches Vercel.
 
 ## Limits you should know about
 
-- **Storage is ephemeral.** The watchlist, resume points, ratings and stream
-  caches live on the service's filesystem and are reset by every new deployment
-  (and whenever the instance is replaced). For durable state, either keep
-  `/api` on a host with a persistent disk (see
-  [web-deployment.md](web-deployment.md)) or mount a volume and point
-  `MOVIEBOX_DATA_DIR` at it.
-- **Media bandwidth.** Playback bytes flow through the `site` service and count
-  against the plan's bandwidth and transfer limits. A hosted deployment is best
-  suited to a handful of viewers; heavy watching is cheaper in the TUI or with
-  "Open in VLC" pointing at a home machine.
-- **No local player.** There is no desktop session on Vercel, so "Open in VLC"
-  degrades to copying the link (`deploy/vercel-api.sh` sets
-  `MOVIEBOX_WEB_LOCAL_PLAYER=0`).
-- **Build time.** The API service compiles the engine (`cargo build --release
-  --locked`). `deploy/vercel-api-build.sh` switches the release profile to thin
-  LTO with 16 codegen units to fit a two-core builder; `Cargo.toml` is
-  untouched, so local and CI release builds keep fat LTO.
-- **Cold starts and long requests.** Provider searches can take several seconds;
-  keep rate limits sane and expect the first request after idle to be slower
-  while the engine service wakes.
-- **Server-sent events.** `/api/library/events` is proxied without buffering,
-  but a platform proxy may still cut a long-lived stream. The client falls back
-  to polling automatically, so syncing keeps working either way.
+- **Storage is ephemeral.** Watchlist, resume points, ratings and stream caches
+  live in `/tmp/ifallhub` and are lost on every new deployment or scale-to-zero
+  cycle. For durable state keep the engine on a host with a persistent disk (see
+  [web-deployment.md](web-deployment.md)) or add a managed store.
+- **Scale to zero.** Container Functions scale down after about five minutes
+  without traffic (30 seconds in preview), so the first request afterwards pays
+  a cold start: node boots, then the engine starts and resolves its provider
+  session.
+- **Request duration.** Very long media responses can exceed the Function
+  duration limit. The player uses range requests and short segments, which is
+  why playback works, but a single multi-hour progressive download is not the
+  intended path on Vercel.
+- **Bandwidth.** Media bytes flow through the Function and count against the
+  plan's fast data transfer.
+- **Image size and build time.** The image carries the Node runtime and a static
+  musl engine binary; expect the first build to take several minutes.
 
 ## Troubleshooting
 
-| Log line | Cause | Fix |
+| Symptom | Cause | Fix |
 | --- | --- | --- |
-| `npm error The npm ci command can only install with an existing package-lock.json` | an install command was given a `--prefix` that Vercel did not resolve | keep `installCommand` as `sh deploy/vercel-site-install.sh`, which changes into `web/` itself |
-| `[site] web/dist ready` missing | the Vite build failed | read above that line; it is a normal `npm run build` error |
-| `[api] cargo not found on PATH` | the runtime image has no Rust toolchain | the script installs rustup automatically; check that the build can reach `sh.rustup.rs` |
-| `[api] cargo finished without target/release/moviebox-tui` | a compile error | the cargo output above it is the real error |
-| 502 from `/api/*` | the `site` service cannot reach the bound API | confirm the `API_URL` binding exists on `site` and that the `api` service starts (its logs print the listen address) |
+| Build fails with `npm ci ... can only install with an existing package-lock.json` | a custom install command resolving outside `web/` | the container runs `npm ci` inside `web/`; do not add an `installCommand` |
+| Build succeeds, deployment 502s | the container is not listening on the port Vercel routes to | keep `ENV PORT=80` (or set `PORT` in project settings to match) |
+| `EACCES` writing state | the container filesystem is read-only | keep `MOVIEBOX_DATA_DIR`/`MOVIEBOX_CONFIG_DIR` under `/tmp` |
+| `/api/health` returns `{"engine": ...}` but searches fail | the engine cannot reach the provider from Vercel's region, or the provider is down | check the Function logs and `python3 scripts/check_playback_links.py` |
+| Container exits immediately | the engine binary is missing or the frontend build failed | read the build log; the image asserts both (`--version` and `dist/index.html`) |
 
 ## Alternatives
 
-- **Static frontend, separate API.** Point the `site` service at
-  `web/` with `framework: "vite"` and rewrite `/api/(.*)` directly to the `api`
-  service. That drops the Node proxy, but Vercel then serves `web/dist` without
-  SPA fallback knowledge, so client routes such as `/watch/moviebox/123` can
-  404 on refresh unless the platform applies an index fallback.
-- **Frontend on Vercel, engine on Render.** Keep this repository's Render
-  blueprint for `/api` and proxy to it with `MOVIEBOX_API_TARGET`; this adds a
-  cross-origin hop, so it needs explicit CORS on the engine and is not the
-  default here.
+- **Render Web Service** with the root `Dockerfile` and `render.yaml`: persistent
+  disk, no scale-to-zero, health checks. See [web-deployment.md](web-deployment.md).
+- **Frontend static + engine elsewhere**: deploy `web/dist` on Vercel and point
+  `MOVIEBOX_API_TARGET` at an engine you host; this adds a cross-origin hop, so
+  the engine has to allow CORS.

@@ -100,7 +100,7 @@ jobs:
   image:
     name: Docker image smoke test
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
@@ -127,6 +127,30 @@ jobs:
         run: |
           set -o pipefail
           node deploy/smoke.mjs --base http://127.0.0.1:8080 --token docker-test-key | tee /tmp/smoke.log
+      # The Vercel deployment is this image (Dockerfile.vercel). Build and boot
+      # it here so a broken container fails CI instead of the deploy.
+      - name: Build Vercel image
+        run: |
+          set -o pipefail
+          docker build -f Dockerfile.vercel -t moviebox-web-vercel . | tee /tmp/docker-vercel-build.log
+      - name: Run Vercel image
+        run: |
+          docker run -d --name moviebox-web-vercel -p 8081:8081 \
+            -e PORT=8081 -e MOVIEBOX_WEB_API_TOKEN=docker-test-key moviebox-web-vercel
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8081/api/health > /dev/null; then
+              echo "vercel image is healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "vercel image never became healthy"
+          docker logs moviebox-web-vercel
+          exit 1
+      - name: Run Vercel image smoke checks
+        run: |
+          set -o pipefail
+          node deploy/smoke.mjs --base http://127.0.0.1:8081 --token docker-test-key | tee /tmp/smoke-vercel.log
       - name: Report results on the PR
         if: always() && github.event_name == 'pull_request'
         env:
@@ -150,6 +174,12 @@ jobs:
             echo ''
             echo '--- container logs ---'
             docker logs --tail 80 moviebox-web 2>&1 || echo '(container not running)'
+            echo ''
+            echo '--- Vercel image (Dockerfile.vercel) smoke checks ---'
+            cat /tmp/smoke-vercel.log 2>/dev/null || echo '(no Vercel smoke log)'
+            echo ''
+            echo '--- Vercel image logs ---'
+            docker logs --tail 80 moviebox-web-vercel 2>&1 || echo '(container not running)'
             echo '```'
           } > /tmp/comment.md
           gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md

@@ -185,11 +185,10 @@ node deploy/smoke.mjs --base http://127.0.0.1:3000 --token devkey --real
 
 ## Vercel
 
-A Vercel services project (`vercel.json` at the repository root) is supported as
-well: a public `site` service serves the frontend and proxies `/api/*` to an
-internal `api` service through the `API_URL` service binding. Storage there is
-ephemeral, so watchlists and resume points reset with each deployment. See
-[vercel-deployment.md](vercel-deployment.md).
+Vercel is supported as a container-image Function: `Dockerfile.vercel` builds the
+same frontend plus Rust engine stack and Vercel routes all traffic to it. Storage
+there is ephemeral (state lives under `/tmp`), and instances scale to zero when
+idle. See [vercel-deployment.md](vercel-deployment.md).
 
 ## Scope and compliance
 

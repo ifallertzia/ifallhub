@@ -142,7 +142,7 @@ On a phone the player keeps out of the way: one horizontal bar with play/pause a
 
 For a fully working public deployment, use the repository's **Docker-based Render Web Service** (`render.yaml` + root `Dockerfile`), which serves the built frontend and proxies `/api/*` to the headless Rust API on one origin — do **not** deploy `web/dist` as a Static Site, because the production build has no API of its own. The image keeps the Rust API on loopback, never launches the TUI, streams media without buffering, and supports access-key protection and rate limits. See [`docs/web-deployment.md`](docs/web-deployment.md).
 
-**Vercel** is supported through a two-service project declared in `vercel.json`: a public `site` service (Node) serves the built frontend and proxies `/api/*`, and an internal `api` service runs the Rust engine, reached through an `API_URL` service binding. See [`docs/vercel-deployment.md`](docs/vercel-deployment.md).
+**Vercel** is supported through a container-image Function: `Dockerfile.vercel` builds the same frontend + Rust engine stack and Vercel routes all traffic to it, so `vercel.json` needs no `services` block. See [`docs/vercel-deployment.md`](docs/vercel-deployment.md).
 
 ## Documentation
 
@@ -158,7 +158,7 @@ Full documentation at [**mesamirh.github.io/MovieBox-Tui**](https://mesamirh.git
 | [Live TV & IPTV](docs/tv-mode.md) | M3U playlist import and channel streaming |
 | [Batch Downloads](docs/downloads.md) | HTTP range engine, pause, and resume |
 | [Web Player Deployment](docs/web-deployment.md) | Render Web Service (Docker) setup, access keys, rate limits |
-| [Vercel Deployment](docs/vercel-deployment.md) | Two-service Vercel project, service bindings, limits |
+| [Vercel Deployment](docs/vercel-deployment.md) | Container-image Function on Vercel, limits, troubleshooting |
 
 ## Contributing
 

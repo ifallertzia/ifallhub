@@ -32,11 +32,16 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npm test
-      - name: Verify Vercel config scripts resolve
+      - name: Verify Vercel deployment files
         run: |
-          # The web suite checks vercel.json references; this keeps the shell
-          # entrypoints parseable even if npm is skipped.
-          for script in deploy/vercel-*.sh; do
+          # The web suite checks the container contract in detail; this keeps a
+          # stripped checkout from silently losing the files Vercel builds.
+          test -f vercel.json
+          test -f Dockerfile.vercel
+          test -f deploy/server.mjs
+          if [ -f web/package-lock.json ]; then echo "web lockfile present"; else exit 1; fi
+          for script in deploy/*.sh; do
+            [ -e "$script" ] || continue
             sh -n "$script"
           done
       - name: Check Rust formatting

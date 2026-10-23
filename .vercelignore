@@ -1,7 +1,10 @@
-# Keep the Vercel upload small: only what the two services build or serve.
-# The `site` service needs web/ (+ its lockfile) and deploy/; the `api` service
-# needs Cargo.toml, Cargo.lock, src/ and .cargo/. Anything else is docs, tests
-# or build output and only slows the upload down.
+# Upload filter for the Vercel project.
+#
+# The deployment is a single container image built from Dockerfile.vercel, so
+# the build context must keep everything that Dockerfile copies: web/ (with its
+# lockfile), src/, Cargo.toml, Cargo.lock, .cargo/ and deploy/. Docs, tests and
+# local build output are dropped to keep the upload (and the docker context)
+# small.
 
 .git
 .github
@@ -16,5 +19,8 @@ node_modules
 web/node_modules
 web/dist
 render.yaml
-Dockerfile
 .dockerignore
+
+# The Render image keeps its own Dockerfile; the Vercel one must be uploaded.
+/Dockerfile
+!Dockerfile.vercel
