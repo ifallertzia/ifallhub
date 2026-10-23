@@ -165,6 +165,15 @@ node deploy/smoke.mjs --base http://127.0.0.1:3000 --token devkey --real
 - **Search returns 502** - the provider was unreachable from the service;
   providers occasionally block datacenter IPs. Try again later or configure
   `MOVIEBOX_FOURKHDHUB_URL`/add-ons.
+- **Every title says "No streams on this source"** - between 2026-10-13 and
+  2026-10-23 the MovieBox API answered `play-info`/`resource` with a short
+  placeholder clip for every title, so nothing was playable anywhere. The engine
+  now recovers the real signed MP4 through `resource-position/v2` and caches
+  under a new schema, so a redeploy of this commit is enough: stream caches
+  written against the placeholder are ignored automatically and no manual
+  volume cleanup is needed. Verify the deployed service with
+  `node deploy/smoke.mjs --base https://<service> --token <key> --real`, which
+  walks search -> streams -> play and fetches real media bytes.
 - **"Playback error" / video never starts** - usually an HEVC (`hvc1`/`hev1`)
   DASH stream or a `.mkv` direct link, which browsers cannot decode. The player
   now ranks those releases behind playable H.264/`.mp4` links, marks them in the

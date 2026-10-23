@@ -561,6 +561,47 @@ pub fn moviebox_resource_item_to_release(item: &serde_json::Value) -> Release {
     }
 }
 
+pub fn moviebox_resource_position_json_to_release(
+    payload: &serde_json::Value,
+    original: &Release,
+    user_agent: &str,
+) -> Option<Release> {
+    let resource_id = original.resource_id.as_deref()?;
+    let data = payload.get("data").unwrap_or(payload);
+    let items = data.get("list")?.as_array()?;
+    for item in items {
+        let candidate = moviebox_resource_item_to_release(item);
+        if candidate.resource_id.as_deref() != Some(resource_id)
+            || candidate.season != original.season
+            || candidate.episode != original.episode
+        {
+            continue;
+        }
+        let Some(url) = candidate.direct_url() else {
+            continue;
+        };
+        let Ok(parsed) = url::Url::parse(url) else {
+            continue;
+        };
+        if !matches!(parsed.scheme(), "http" | "https") {
+            continue;
+        }
+        let mut release = original.clone();
+        release.mirrors = candidate.mirrors;
+        // The original size belongs to the placeholder clip, not the recovered file.
+        if candidate.size_bytes.is_some() {
+            release.size_bytes = candidate.size_bytes;
+        }
+        for mirror in &mut release.mirrors {
+            mirror.direct_file = true;
+            // Direct MP4s reject the DASH referer with HTTP 429.
+            mirror.headers = vec![("User-Agent".to_string(), user_agent.to_string())];
+        }
+        return Some(release);
+    }
+    None
+}
+
 pub fn is_deprecation_notice_url(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     lower.contains("1c7de0bd3393702d9191801f15f88f8d")
@@ -579,32 +620,16 @@ fn to_manifest_url(url_str: &str) -> Option<String> {
     if base.is_empty() || !(base.starts_with("http://") || base.starts_with("https://")) {
         return None;
     }
-    // Already a manifest file
-    if base.ends_with(".mpd") || base.ends_with(".m3u8") || base.ends_with(".m3u") {
+    // Already a resolved DASH manifest.
+    if base.ends_with(".mpd") {
         return Some(base.to_string());
     }
     if base.contains("/dash/") {
         return Some(format!("{base}/index.mpd"));
     }
-    if base.contains("/hls/") {
-        // HLS manifests are typically index.m3u8 inside the hls folder
-        return Some(format!("{base}/index.m3u8"));
-    }
-    // Fallback: if url looks like a cdn path with dash or hls segment, try to infer
-    // For backward compatibility, also accept any url that has at least 2 path segments after domain
-    // and treat it as potential dash if it doesn't explicitly say hls
-    if base.contains("hakunaymatata.com")
-        || base.contains("aoneroom.com")
-        || base.contains("sacdn")
-        || base.contains("sbcdn")
-    {
-        // Default to dash for legacy cdn urls that don't have explicit marker but are from known cdns
-        // However if url contains \"hls\" anywhere, treat as hls
-        if base.to_ascii_lowercase().contains("hls") {
-            return Some(format!("{base}/index.m3u8"));
-        }
-        return Some(format!("{base}/index.mpd"));
-    }
+    // Legacy `/hls/` cookie targets are no longer hosted by the MovieBox CDN
+    // (they answer 404), so they are dropped instead of being advertised as
+    // playable streams. Only `/dash/` resources are accepted.
     None
 }
 
@@ -845,6 +870,121 @@ pub fn moviebox_resource_json_to_releases(payload: &serde_json::Value) -> Vec<Re
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_resource_position_reports_recovered_file_size() {
+        let original = moviebox_resource_item_to_release(&json!({
+            "resourceId": "42",
+            "resourceLink": "https://macdn.aoneroom.com/other/2026/10/10/upgrade.mp4",
+            "resolution": 720,
+            "size": "824720",
+            "se": 0,
+            "ep": 0
+        }));
+        let payload = json!({"data": {"list": [{
+            "resourceId": "42",
+            "resourceLink": "https://cdn.example.com/resource/movie.mp4?sign=abc&t=123",
+            "size": "1473204930",
+            "se": 0,
+            "ep": 0
+        }]}});
+        let recovered =
+            moviebox_resource_position_json_to_release(&payload, &original, "TestAgent")
+                .expect("recover original file");
+        assert_eq!(recovered.size_bytes, Some(1473204930));
+    }
+
+    #[test]
+    fn test_resource_position_recovers_file_and_preserves_release_metadata() {
+        let original = moviebox_resource_item_to_release(&json!({
+            "resourceId": 6154402015721538488_i64,
+            "title": "Example Movie",
+            "resourceLink": "https://macdn.aoneroom.com/other/2026/10/10/upgrade.mp4",
+            "resolution": 1080,
+            "codecName": "hevc",
+            "size": "1010288591",
+            "se": 0,
+            "ep": 0
+        }));
+        assert!(original.mirrors.is_empty());
+        let payload = json!({"data": {"list": [{
+            "resourceId": "6154402015721538488",
+            "resourceLink": "https://cdn.example.com/resource/movie.mp4?sign=abc&t=123",
+            "se": 0,
+            "ep": 0
+        }]}});
+        let recovered =
+            moviebox_resource_position_json_to_release(&payload, &original, "TestAgent")
+                .expect("recover original file");
+        assert_eq!(recovered.filename, original.filename);
+        assert_eq!(recovered.quality.as_deref(), Some("1080p"));
+        assert_eq!(recovered.codec, original.codec);
+        assert_eq!(recovered.size_bytes, Some(1010288591));
+        assert_eq!(recovered.resource_id, original.resource_id);
+        assert_eq!(
+            recovered.direct_url(),
+            Some("https://cdn.example.com/resource/movie.mp4?sign=abc&t=123")
+        );
+        assert!(recovered.mirrors[0].direct_file);
+        assert_eq!(
+            recovered.mirrors[0].headers,
+            vec![("User-Agent".to_string(), "TestAgent".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_resource_position_rejects_notices_wrong_resources_and_wrong_episodes() {
+        let original = moviebox_resource_item_to_release(&json!({
+            "resourceId": "episode2",
+            "se": "1",
+            "ep": "2"
+        }));
+        for item in [
+            json!({"resourceId": "episode1", "se": 1, "ep": 2,
+                "resourceLink": "https://cdn.example.com/another.mp4"}),
+            json!({"resourceId": "episode2", "se": 1, "ep": 1,
+                "resourceLink": "https://cdn.example.com/wrong-episode.mp4"}),
+            json!({"resourceId": "episode2", "se": 2, "ep": 2,
+                "resourceLink": "https://cdn.example.com/wrong-season.mp4"}),
+            json!({"resourceId": "episode2", "se": 1, "ep": 2,
+                "resourceLink": "https://macdn.aoneroom.com/other/2026/10/10/upgrade.mp4"}),
+            json!({"resourceId": "episode2", "se": 1, "ep": 2,
+                "resourceLink": "file:///tmp/movie.mp4"}),
+            json!({"resourceId": "episode2", "se": 1, "ep": 2,
+                "resourceLink": ""}),
+        ] {
+            assert!(
+                moviebox_resource_position_json_to_release(
+                    &json!({"list": [item]}),
+                    &original,
+                    "TestAgent"
+                )
+                .is_none()
+            );
+        }
+        for payload in [json!({}), json!({"list": []}), json!({"data": null})] {
+            assert!(
+                moviebox_resource_position_json_to_release(&payload, &original, "TestAgent")
+                    .is_none()
+            );
+        }
+
+        let payload = json!({"list": [
+            {"resourceId": "episode1", "se": 1, "ep": 1,
+                "resourceLink": "https://cdn.example.com/episode1.mp4"},
+            {"resourceId": "episode2", "se": 1, "ep": 2,
+                "resourceLink": "https://cdn.example.com/episode2.mp4"}
+        ]});
+        let recovered =
+            moviebox_resource_position_json_to_release(&payload, &original, "TestAgent")
+                .expect("recover matching episode only");
+        assert_eq!(recovered.season, Some(1));
+        assert_eq!(recovered.episode, Some(2));
+        assert_eq!(
+            recovered.direct_url(),
+            Some("https://cdn.example.com/episode2.mp4")
+        );
+    }
 
     #[test]
     fn test_moviebox_search_json_to_catalog() {
@@ -1131,10 +1271,7 @@ mod tests {
             );
         }
         let hls_cookie = "Edge-Cache-Cookie=urlprefix=aHR0cHM6Ly9zYmNkbjMuaGFrdW5heW1hdGF0YS5jb20vaGxzLzUyODM0MjAzNzkzODAzMzU1NzYtMS0xLTcyMC05NDYv:sign=9d668fe770e7d41d067f80422544d47e:t=1791308037";
-        assert_eq!(
-            resolve_dash_manifest_from_policy(hls_cookie).as_deref(),
-            Some("https://sbcdn3.hakunaymatata.com/hls/5283420379380335576-1-1-720-946/index.m3u8")
-        );
+        assert_eq!(resolve_dash_manifest_from_policy(hls_cookie), None);
     }
 
     #[test]
@@ -1198,7 +1335,7 @@ mod tests {
         );
     }
     #[test]
-    fn test_hls_signed_policy_now_supported() {
+    fn test_unhosted_hls_signed_policy_is_dropped() {
         let payload = json!({
             "code": 0,
             "data": {
@@ -1219,12 +1356,18 @@ mod tests {
             }
         });
         let releases = moviebox_play_info_json_to_releases(&payload, 1, 1, "TestAgent/1.0");
-        // HLS should now be supported, producing a release with m3u8 url
-        assert_eq!(releases.len(), 1);
-        assert_eq!(
-            releases[0].direct_url(),
-            Some("https://sbcdn3.hakunaymatata.com/hls/404231799767024856-1-1-720-974/index.m3u8")
-        );
+        // Unhosted `/hls/` cookie targets answer 404 on the MovieBox CDN, so a
+        // stream that only carries one must not be advertised as playable.
+        let mut hls_targets = 0;
+        for release in &releases {
+            if release
+                .direct_url()
+                .is_some_and(|url| url.contains("/hls/"))
+            {
+                hls_targets += 1;
+            }
+        }
+        assert_eq!(hls_targets, 0, "unhosted HLS targets must be dropped");
     }
 
     #[test]
