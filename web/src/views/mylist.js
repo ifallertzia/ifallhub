@@ -3,6 +3,7 @@
 
 import { escapeHtml } from '../lib/format.js';
 import * as library from '../lib/library.js';
+import { officialRatingOf } from '../lib/media-helpers.js';
 import { cachedMeta, ensureMeta, setAmbientSeed, toast } from '../state.js';
 import {
   cardGridHtml,
@@ -81,7 +82,7 @@ export async function renderMyList(container, ctx = {}) {
                 const m = cachedMeta(p, id);
                 return {
                   metaEntry: m,
-                  rating: item.imdb_rating ?? m?.imdb_rating,
+                  rating: officialRatingOf(item, m),
                   listed: library.isInWatchlist(p, id),
                   progress: library.progressFor(p, id),
                   personalRating: library.ratingFor(p, id),
@@ -94,7 +95,7 @@ export async function renderMyList(container, ctx = {}) {
                   tab === 'rated'
                     ? 'Open any movie or series and tap Rate to score what you’ve watched.'
                     : 'Tap the bookmark icon on any movie or series poster to save it here.',
-                action: `<a href="/movies" data-nav class="inline-flex h-10 items-center rounded-full bg-primary px-5 text-[14px] font-semibold text-on-primary">Browse movies</a>`,
+                action: `<a href="/movies" data-nav class="pill-selected inline-flex h-10 items-center rounded-full px-5 text-[14px] font-semibold">Browse movies</a>`,
               })
         }
       </div>`;

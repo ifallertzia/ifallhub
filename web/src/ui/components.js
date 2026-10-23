@@ -12,7 +12,8 @@ import {
   providerLabel,
   relativeTime,
 } from '../lib/format.js';
-import { detailPathFor, itemGenres, mediaArt } from '../lib/media-helpers.js';
+import { detailPathFor, itemGenres, mediaArt, officialRatingOf } from '../lib/media-helpers.js';
+import { watchPath } from '../lib/router.js';
 import { progressFraction } from '../lib/recommend.js';
 import { iconHtml } from './icons.js';
 
@@ -62,7 +63,7 @@ export function posterCardHtml(item, meta = {}) {
   const kind = series ? 'series' : 'movie';
   const fallback = mediaArt(title, year, kind, 'poster');
   const poster = meta.poster || itemPoster(item) || fallback;
-  const rating = formatRating(meta.rating ?? item?.imdb_rating);
+  const rating = formatRating(meta.rating ?? officialRatingOf(item, meta.metaEntry));
   const listed = Boolean(meta.listed);
   const progress = meta.progress ? progressFraction(meta.progress) : 0;
   const genres = itemGenres(item, meta.metaEntry);
@@ -114,7 +115,7 @@ export function posterCardHtml(item, meta = {}) {
           ${
             progress > 0 && progress < 1
               ? `<span class="absolute inset-x-2 bottom-2 h-1 overflow-hidden rounded-full bg-black/55 backdrop-blur-sm">
-                   <span class="block h-full rounded-full bg-white" style="width:${Math.round(progress * 100)}%"></span>
+                   <span class="block h-full rounded-full bg-brand" style="width:${Math.round(progress * 100)}%"></span>
                  </span>`
               : progress >= 1
                 ? `<span class="absolute bottom-2 left-2 rounded-full bg-black/65 px-2 py-[2px] text-[10.5px] font-semibold text-white/90 backdrop-blur-md">Watched</span>`
@@ -122,7 +123,7 @@ export function posterCardHtml(item, meta = {}) {
           }
           ${
             meta.personalRating
-              ? `<span class="absolute bottom-2 right-2 rounded-full bg-white/90 px-2 py-[2px] text-[10.5px] font-bold text-black shadow">★ ${escapeHtml(String(meta.personalRating))}</span>`
+              ? `<span class="absolute bottom-2 right-2 rounded-full bg-brand/95 px-2 py-[2px] text-[10.5px] font-bold text-white shadow">★ ${escapeHtml(String(meta.personalRating))}</span>`
               : ''
           }
         </div>
@@ -136,7 +137,7 @@ export function posterCardHtml(item, meta = {}) {
         aria-pressed="${listed ? 'true' : 'false'}"
         class="absolute top-2 right-2 z-10 grid h-8 w-8 place-items-center rounded-full backdrop-blur-md transition ${
           listed
-            ? 'bg-primary text-on-primary shadow'
+            ? 'pill-selected'
             : 'bg-black/55 text-white opacity-95 desk:opacity-0 desk:group-hover/poster:opacity-100 focus:opacity-100 hover:bg-black/75'
         }"
       >
@@ -200,7 +201,7 @@ export function chipsHtml(options = [], value = '', { className = '', attrName =
             aria-selected="${on ? 'true' : 'false'}"
             ${attrName}="${escapeHtml(String(opt.id))}"
             class="h-8 shrink-0 rounded-full px-3.5 text-[13.5px] font-semibold transition-colors ${
-              on ? 'bg-primary text-on-primary' : 'bg-fill text-fg hover:bg-fill-2'
+              on ? 'pill-selected' : 'bg-fill text-fg hover:bg-fill-2'
             }"
           >${escapeHtml(opt.label)}</button>`;
         })
@@ -210,7 +211,7 @@ export function chipsHtml(options = [], value = '', { className = '', attrName =
 
 export function chipHtml(label, { active = false, href = '', dataset = '' } = {}) {
   const classes = `inline-flex h-8 shrink-0 items-center rounded-full px-3.5 text-[13.5px] font-semibold transition-colors ${
-    active ? 'bg-primary text-on-primary' : 'bg-fill text-fg hover:bg-fill-2'
+    active ? 'pill-selected' : 'bg-fill text-fg hover:bg-fill-2'
   }`;
   if (href) return `<a class="${classes}" href="${escapeHtml(href)}" data-nav ${dataset}>${escapeHtml(label)}</a>`;
   return `<button class="${classes}" type="button" ${dataset}>${escapeHtml(label)}</button>`;
@@ -313,22 +314,20 @@ export function progressRowHtml(entry, { index = 0 } = {}) {
           <span>${escapeHtml(relativeTime(entry.updated_at))}</span>
         </div>
         <div class="mt-1.5 h-1 w-full max-w-[260px] overflow-hidden rounded-full bg-fill-2">
-          <div class="h-full rounded-full bg-primary" style="width:${percent}%"></div>
+          <div class="h-full rounded-full bg-brand" style="width:${percent}%"></div>
         </div>
       </a>
       <div class="flex shrink-0 items-center gap-1.5">
         <span class="hidden text-[12px] font-medium tabular-nums text-fg-2 sm:inline">${percent}%</span>
-        <button
-          type="button"
-          data-try-play
-          data-season="${escapeHtml(String(entry.season || 0))}"
-          data-episode="${escapeHtml(String(entry.episode || 0))}"
+        <a
+          href="${escapeHtml(watchPath(provider, id, { season: Number(entry.season) || 0, episode: Number(entry.episode) || 0 }))}"
+          data-nav
           aria-label="Resume ${escapeHtml(title)}"
-          class="inline-flex h-8 items-center gap-1.5 rounded-full bg-primary px-3.5 text-[13px] font-semibold text-on-primary transition active:scale-[0.98]"
+          class="pill-selected inline-flex h-8 items-center gap-1.5 rounded-full px-3.5 text-[13px] font-semibold transition active:scale-[0.98]"
         >
           ${iconHtml('play', { size: 12 })}
           <span>Resume</span>
-        </button>
+        </a>
         <button
           type="button"
           data-clear-progress

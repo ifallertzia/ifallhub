@@ -1,24 +1,20 @@
-// Sidify-V2 `MediaBrowsePage` (`Movies` & `Series` views) wired to Ifallhub's
-// `/api/collections`, `/api/discover`, `/api/search`, `/api/meta`, and `/api/library`.
+// Sidify-V2 visually styled Movies & Series browse view powered by MovieBox-TUI's
+// `/api/collections`, `/api/discover` (paged), `/api/search`, `/api/suggest`, `/api/meta`, and `/api/library`.
 
 import * as api from '../lib/api.js';
 import {
-  displayUiText,
   escapeHtml,
   formatRating,
-  formatRuntime,
-  isKnownProvider,
   isSeriesItem,
   itemId,
-  itemPoster,
   itemProvider,
   itemTitle,
   itemYear,
   providerLabel,
-  seasonCount,
 } from '../lib/format.js';
 import * as library from '../lib/library.js';
 import {
+  DEFAULT_GENRES,
   SORTS,
   detailPathFor,
   extractMediaFacets,
@@ -26,238 +22,198 @@ import {
   itemBackdrop,
   itemGenres,
   mediaArt,
+  officialRatingOf,
 } from '../lib/media-helpers.js';
-import {
-  becauseYouWatched,
-  continueWatching,
-  dedupeItems,
-  heroCandidates,
-} from '../lib/recommend.js';
+import { becauseYouWatched, continueWatching, dedupeItems } from '../lib/recommend.js';
+import * as router from '../lib/router.js';
 import {
   cachedMeta,
   ensureMeta,
+  getCollectionsCached,
   setAmbientSeed,
   setProvider,
-  state,
+  state as appState,
 } from '../state.js';
 import {
   cardGridHtml,
   chipsHtml,
   emptyStateHtml,
   errorStateHtml,
-  pageTitleHtml,
   posterCardHtml,
   posterGridSkeletonHtml,
   sectionHeaderHtml,
   shelfHtml,
 } from '../ui/components.js';
 import { iconHtml } from '../ui/icons.js';
-import { openEngineSheet } from '../ui/sheets.js';
 
-const DEMO_DISMISSED_KEY = 'ifallhub_demo_notice_dismissed';
-
-function isDemoDismissed() {
-  try {
-    return sessionStorage.getItem(DEMO_DISMISSED_KEY) === '1';
-  } catch {
-    return false;
+function mergeParams(basePath, current, patch) {
+  const next = new URLSearchParams(current);
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === '' || v === null || v === undefined) next.delete(k);
+    else next.set(k, String(v));
   }
+  if (next.get('sort') === 'trending') next.delete('sort');
+  const qs = next.toString();
+  return `${basePath}${qs ? `?${qs}` : ''}`;
 }
 
-function buildSegmentedToggle(kind) {
-  const options = [
-    { id: 'movie', label: 'Movies', href: '/movies' },
-    { id: 'series', label: 'Series', href: '/series' },
-  ];
-  return `
-    <div class="inline-flex rounded-full bg-fill p-1">
-      ${options
-        .map((opt) => {
-          const active = opt.id === kind;
-          return `<a
-            href="${opt.href}"
-            data-nav
-            aria-current="${active ? 'page' : 'false'}"
-            class="rounded-full px-4 py-1 text-[13px] font-semibold transition-colors ${
-              active ? 'bg-primary text-on-primary' : 'text-fg-2 hover:bg-fill-2 hover:text-fg'
-            }"
-          >${opt.label}</a>`;
-        })
-        .join('')}
-    </div>`;
-}
+export async function renderMediaBrowse(root, route = {}, forcedKind = '') {
+  const kind = forcedKind || (route.name === 'series' ? 'series' : 'movie');
+  const isSeriesView = kind === 'series';
+  const basePath = isSeriesView ? '/series' : '/movies';
+  const query = route.query || new URLSearchParams();
+  const routeSignal = route.signal;
 
-function mediaHeroHtml(hero, kind) {
-  if (!hero) return '';
-  const provider = itemProvider(hero);
-  const id = itemId(hero);
-  const title = itemTitle(hero);
-  const year = itemYear(hero);
-  const metaEntry = cachedMeta(provider, id);
-  const series = kind === 'series' || isSeriesItem(hero);
-  const fallback = mediaArt(title, year, series ? 'series' : 'movie', 'backdrop');
-  const backdrop = itemBackdrop(hero) || fallback;
-  const rating = formatRating(hero.imdb_rating ?? metaEntry?.imdb_rating);
-  const runtime = formatRuntime(hero.duration || metaEntry?.duration);
-  const seasons = seasonCount(hero);
-  const genres = itemGenres(hero, metaEntry).slice(0, 3).join(', ');
-  const listed = library.isInWatchlist(provider, id);
-  const href = detailPathFor(provider, id, series);
-
-  const metaBits = [
-    year,
-    series && seasons ? `${seasons} ${seasons === 1 ? 'season' : 'seasons'}` : runtime,
-    genres,
-  ].filter(Boolean);
-
-  return `
-    <section
-      class="relative -mt-2 mb-6 overflow-hidden desk:mx-8 desk:mt-0 desk:mb-8 desk:rounded-[20px] desk:ring-1 desk:ring-edge"
-      data-card
-      data-provider="${escapeHtml(provider)}"
-      data-id="${escapeHtml(id)}"
-      data-title="${escapeHtml(title)}"
-      data-year="${escapeHtml(year || '')}"
-      data-poster="${escapeHtml(itemPoster(hero) || '')}"
-      data-type="${series ? 'series' : 'movie'}"
-      data-rating="${escapeHtml(rating || '')}"
-    >
-      <div class="relative min-h-[420px] w-full bg-raised desk:min-h-[470px]">
-        <img
-          src="${escapeHtml(backdrop)}"
-          data-fallback-src="${escapeHtml(fallback)}"
-          alt=""
-          aria-hidden="true"
-          class="absolute inset-0 h-full w-full object-cover"
-        />
-        <div
-          aria-hidden="true"
-          class="absolute inset-0"
-          style="background: linear-gradient(90deg, rgba(0,0,0,0.82) 0%, rgba(0,0,0,0.52) 44%, rgba(0,0,0,0.18) 74%, rgba(0,0,0,0.06) 100%), linear-gradient(180deg, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0.24) 42%, rgba(0,0,0,0.78) 78%, var(--bg) 100%)"
-        ></div>
-
-        <div class="relative flex min-h-[420px] flex-col justify-end p-5 text-white desk:min-h-[470px] desk:max-w-[650px] desk:p-10">
-          <div class="flex flex-wrap items-center gap-2 text-[11px] font-bold tracking-[0.9px] text-white/80 uppercase">
-            <span class="rounded-full bg-white/15 px-2.5 py-1 backdrop-blur-md">
-              ${series ? 'Featured series' : 'Featured film'}
-            </span>
-            ${
-              rating
-                ? `<span class="inline-flex items-center gap-1 text-white/95">
-                     ${iconHtml('starFilled', { size: 12 })}
-                     ${escapeHtml(rating)}
-                   </span>`
-                : ''
-            }
-            <span class="text-white/60">· ${escapeHtml(providerLabel(provider))}</span>
-          </div>
-
-          <h2 class="mt-3 text-[32px] leading-[1.05] font-extrabold tracking-[-0.8px] text-white desk:text-[46px] desk:tracking-[-1.2px]">
-            ${escapeHtml(title)}
-          </h2>
-
-          ${
-            metaBits.length
-              ? `<div class="mt-2.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[13px] font-medium text-white/75">
-                   ${escapeHtml(metaBits.join(' · '))}
-                 </div>`
-              : ''
-          }
-
-          ${
-            hero.description
-              ? `<p class="mt-3 line-clamp-2 max-w-[600px] text-[14px] leading-relaxed text-white/80 desk:line-clamp-3 desk:text-[15px]">
-                   ${escapeHtml(hero.description)}
-                 </p>`
-              : ''
-          }
-
-          <div class="mt-5 flex flex-wrap items-center gap-2.5">
-            <a
-              href="${escapeHtml(href)}"
-              data-nav
-              class="inline-flex h-11 items-center gap-2 rounded-full bg-white px-6 text-[15px] font-semibold text-black shadow-lg transition active:scale-[0.98]"
-            >
-              ${iconHtml('info', { size: 17 })}
-              <span>More info</span>
-            </a>
-
-            <button
-              type="button"
-              data-try-play
-              class="inline-flex h-11 items-center gap-2 rounded-full bg-white/16 px-5 text-[15px] font-semibold text-white ring-1 ring-white/20 backdrop-blur-xl transition hover:bg-white/24 active:scale-[0.98]"
-            >
-              ${iconHtml('play', { size: 15 })}
-              <span>Watch now</span>
-            </button>
-
-            <button
-              type="button"
-              data-watchlist="${listed ? '1' : '0'}"
-              aria-label="${listed ? 'Remove from Watchlist' : 'Add to Watchlist'}"
-              aria-pressed="${listed ? 'true' : 'false'}"
-              class="grid h-11 w-11 place-items-center rounded-full backdrop-blur-xl transition active:scale-95 ${
-                listed ? 'bg-white text-black' : 'bg-white/15 text-white ring-1 ring-white/20 hover:bg-white/25'
-              }"
-            >
-              ${iconHtml(listed ? 'check' : 'bookmark', { size: 18 })}
-            </button>
-          </div>
-        </div>
-      </div>
-    </section>`;
-}
-
-export async function renderMediaBrowse(container, ctx = {}, forcedKind = '') {
-  const urlKind = ctx.query?.get('type');
-  const kind =
-    forcedKind ||
-    (urlKind === 'series' ? 'series' : urlKind === 'movie' ? 'movie' : 'movie');
-
-  const initialProvider =
-    ctx.query?.get('provider') && isKnownProvider(ctx.query.get('provider'))
-      ? ctx.query.get('provider')
-      : state.provider;
-  if (initialProvider !== state.provider) setProvider(initialProvider);
-
-  const filterState = {
-    provider: initialProvider,
-    q: (ctx.query?.get('q') || '').trim(),
-    genre: ctx.query?.get('genre') || '',
-    year: ctx.query?.get('year') || '',
-    sort: ctx.query?.get('sort') || 'trending',
-    page: 1,
-    hasMore: true,
+  const viewState = {
+    provider: query.get('provider') || query.get('source') || appState.provider || 'moviebox',
+    genre: query.get('genre') || '',
+    year: query.get('year') || '',
+    sort: query.get('sort') || 'trending',
+    collections: null,
+    discoverItems: [],
+    discoverPage: 1,
+    hasMoreDiscover: true,
     loadingMore: false,
+    providerSearchItems: [],
+    providerSearchPage: 1,
+    hasMoreProviderSearch: false,
+    suggestions: [],
+    suggestOpen: false,
+    loading: true,
+    error: '',
   };
 
-  let rawCatalog = [];
-  let collectionRows = [];
-  let metrics = {};
-  let remoteSearchItems = null;
-  let searchTimer = 0;
+  setProvider(viewState.provider);
 
-  container.innerHTML = `
-    <div class="fade-up pb-12">
-      ${pageTitleHtml(kind === 'series' ? 'Series' : 'Movies', {
-        trailingHtml: buildSegmentedToggle(kind),
-      })}
-      <div data-demo-slot></div>
-      <div data-hero-slot>
-        <div class="px-4 pb-6 desk:px-8">
-          <div class="skeleton h-[380px] w-full rounded-[20px] desk:h-[440px]"></div>
+  let disposed = false;
+  let suggestTimer = null;
+  let suggestCounter = 0;
+  let unsubLibrary = null;
+
+  const isFiltered = () =>
+    Boolean(viewState.genre || viewState.year || viewState.sort !== 'trending');
+
+  root.innerHTML = `
+    <div class="fade-up pb-16">
+      <!-- Top Controls Bar -->
+      <div class="flex flex-col gap-3 px-4 pt-3 pb-4 desk:px-8 desk:pt-6">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-3">
+            <!-- Movies | Series Segmented Switcher (crimson selected pill — never stark white) -->
+            <div class="inline-flex rounded-full bg-fill p-1 ring-1 ring-edge" role="tablist" aria-label="Media type">
+              <a
+                href="/movies${viewState.provider !== 'moviebox' ? `?provider=${encodeURIComponent(viewState.provider)}` : ''}"
+                data-nav
+                role="tab"
+                aria-selected="${!isSeriesView ? 'true' : 'false'}"
+                class="inline-flex h-8 items-center gap-1.5 rounded-full px-4 text-[13.5px] font-semibold transition-colors ${
+                  !isSeriesView ? 'pill-selected' : 'text-fg-2 hover:text-fg'
+                }"
+              >
+                ${iconHtml('film', { size: 14 })}
+                <span>Movies</span>
+              </a>
+              <a
+                href="/series${viewState.provider !== 'moviebox' ? `?provider=${encodeURIComponent(viewState.provider)}` : ''}"
+                data-nav
+                role="tab"
+                aria-selected="${isSeriesView ? 'true' : 'false'}"
+                class="inline-flex h-8 items-center gap-1.5 rounded-full px-4 text-[13.5px] font-semibold transition-colors ${
+                  isSeriesView ? 'pill-selected' : 'text-fg-2 hover:text-fg'
+                }"
+              >
+                ${iconHtml('tv', { size: 14 })}
+                <span>Series</span>
+              </a>
+            </div>
+            ${
+              viewState.provider !== 'moviebox'
+                ? `<span class="hidden rounded-full bg-brand/15 px-3 py-1 text-[12px] font-semibold text-brand sm:inline-flex">${escapeHtml(providerLabel(viewState.provider))}</span>`
+                : ''
+            }
+          </div>
+
+          <!-- MovieBox-TUI Search Bar + Live /api/suggest -->
+          <div class="relative w-full sm:w-auto sm:min-w-[270px] desk:min-w-[330px]">
+            <form data-browse-search-form class="relative flex items-center" autocomplete="off">
+              <span class="pointer-events-none absolute left-3.5 text-fg-3">
+                ${iconHtml('search', { size: 15 })}
+              </span>
+              <input
+                type="search"
+                data-browse-search
+                value=""
+                placeholder="Search ${isSeriesView ? 'series' : 'movies'} on ${escapeHtml(providerLabel(viewState.provider))}…"
+                aria-label="Search ${isSeriesView ? 'series' : 'movies'}"
+                class="h-9 w-full rounded-full bg-fill pr-8 pl-9 text-[13.5px] text-fg placeholder:text-fg-3 focus:bg-fill-2 focus:ring-2 focus:ring-brand/45"
+              />
+            </form>
+            <div
+              data-browse-suggest
+              hidden
+              class="menu-glass absolute top-[calc(100%+6px)] right-0 left-0 z-30 overflow-hidden rounded-[12px] py-1.5"
+            ></div>
+          </div>
+        </div>
+
+        <!-- Genre Chips + Sort + Year Row -->
+        <div class="flex flex-wrap items-center justify-between gap-2.5">
+          <div data-genre-bar class="min-w-0 flex-1 overflow-hidden"></div>
+
+          <div class="flex shrink-0 items-center gap-2">
+            <select
+              data-year-select
+              aria-label="Filter by year"
+              class="h-8 rounded-full bg-fill px-3 text-[13px] font-semibold text-fg hover:bg-fill-2"
+            >
+              <option value="">All years</option>
+            </select>
+            <select
+              data-sort-select
+              aria-label="Sort titles"
+              class="h-8 rounded-full bg-fill px-3 text-[13px] font-semibold text-fg hover:bg-fill-2"
+            >
+              ${SORTS.map(
+                (s) =>
+                  `<option value="${escapeHtml(s.id)}" ${viewState.sort === s.id ? 'selected' : ''}>${escapeHtml(s.label)}</option>`,
+              ).join('')}
+            </select>
+            <button
+              type="button"
+              data-reset-filters
+              ${isFiltered() ? '' : 'hidden'}
+              class="h-8 rounded-full bg-fill px-3 text-[12.5px] font-semibold text-brand hover:bg-fill-2"
+            >
+              Reset
+            </button>
+          </div>
         </div>
       </div>
-      <div data-filter-slot class="mb-6 space-y-3 px-4 desk:px-8"></div>
-      <div data-shelves-slot class="space-y-9"></div>
-      <div data-grid-slot class="mt-9">${posterGridSkeletonHtml(12)}</div>
+
+      <!-- Content Mount -->
+      <div data-browse-content>
+        ${posterGridSkeletonHtml(12)}
+      </div>
     </div>`;
 
-  const demoSlot = container.querySelector('[data-demo-slot]');
-  const heroSlot = container.querySelector('[data-hero-slot]');
-  const filterSlot = container.querySelector('[data-filter-slot]');
-  const shelvesSlot = container.querySelector('[data-shelves-slot]');
-  const gridSlot = container.querySelector('[data-grid-slot]');
+  const searchInput = root.querySelector('[data-browse-search]');
+  const suggestEl = root.querySelector('[data-browse-suggest]');
+  const resetBtn = root.querySelector('[data-reset-filters]');
+  const genreBar = root.querySelector('[data-genre-bar]');
+  const yearSelect = root.querySelector('[data-year-select]');
+  const sortSelect = root.querySelector('[data-sort-select]');
+  const contentHost = root.querySelector('[data-browse-content]');
+
+  function syncUrl() {
+    const nextHref = mergeParams(basePath, new URLSearchParams(), {
+      provider: viewState.provider !== 'moviebox' ? viewState.provider : '',
+      genre: viewState.genre,
+      year: viewState.year,
+      sort: viewState.sort,
+    });
+    window.history.replaceState(null, '', nextHref);
+    resetBtn.hidden = !isFiltered();
+  }
 
   function metaLookup(item) {
     return cachedMeta(itemProvider(item), itemId(item));
@@ -267,544 +223,616 @@ export async function renderMediaBrowse(container, ctx = {}, forcedKind = '') {
     const p = itemProvider(item);
     const id = itemId(item);
     const m = cachedMeta(p, id);
-    const ratingEntry = library.ratingFor(p, id);
     return {
       metaEntry: m,
-      rating: item?.imdb_rating ?? m?.imdb_rating,
+      rating: officialRatingOf(item, m),
       listed: library.isInWatchlist(p, id),
       progress: library.progressFor(p, id),
-      personalRating: ratingEntry,
+      personalRating: library.ratingFor(p, id),
     };
   }
 
-  function renderDemoBanner() {
-    if (!demoSlot) return;
-    if ((api.state.engine !== 'demo' && api.state.engine !== 'offline') || isDemoDismissed()) {
-      demoSlot.innerHTML = '';
+  function filterByKind(items = []) {
+    return items.filter((it) => (isSeriesView ? isSeriesItem(it) : !isSeriesItem(it)));
+  }
+
+  function allPoolItems() {
+    if (viewState.provider !== 'moviebox') {
+      return dedupeItems(viewState.providerSearchItems);
+    }
+    const cols = viewState.collections || {};
+    const combined = [
+      ...(cols.trending || []),
+      ...(cols.top_rated || []),
+      ...(cols.fresh || []),
+      ...(cols.most_watched || []),
+      ...viewState.discoverItems,
+    ];
+    return dedupeItems(combined);
+  }
+
+  function renderFacets(pool) {
+    const { genres, years } = extractMediaFacets(pool, metaLookup);
+    const genreOptions = [
+      { id: '', label: 'All' },
+      ...genres.slice(0, 14).map((g) => ({ id: g, label: g })),
+    ];
+    genreBar.innerHTML = chipsHtml(genreOptions, viewState.genre, { attrName: 'data-genre-chip' });
+
+    const currentYear = viewState.year;
+    yearSelect.innerHTML = [
+      `<option value="">All years</option>`,
+      `<option value="2020s" ${currentYear === '2020s' ? 'selected' : ''}>2020s</option>`,
+      `<option value="2010s" ${currentYear === '2010s' ? 'selected' : ''}>2010s</option>`,
+      `<option value="2000s" ${currentYear === '2000s' ? 'selected' : ''}>2000s</option>`,
+      ...years
+        .slice(0, 18)
+        .map(
+          (y) =>
+            `<option value="${escapeHtml(y)}" ${currentYear === y ? 'selected' : ''}>${escapeHtml(y)}</option>`,
+        ),
+    ].join('');
+  }
+
+  function heroBannerHtml(item) {
+    if (!item) return '';
+    const provider = itemProvider(item);
+    const id = itemId(item);
+    const title = itemTitle(item);
+    const year = itemYear(item);
+    const series = isSeriesItem(item);
+    const m = cachedMeta(provider, id);
+    const rating = formatRating(officialRatingOf(item, m));
+    const genres = itemGenres(item, m);
+    const backdropFallback = mediaArt(title, year, series ? 'series' : 'movie', 'backdrop');
+    const backdrop = itemBackdrop(item) || backdropFallback;
+    const detailHref = detailPathFor(provider, id, series);
+    const playHref = router.watchPath(provider, id);
+    const listed = library.isInWatchlist(provider, id);
+    const desc = item.description || m?.description || '';
+
+    setAmbientSeed(`${title}:${year}`);
+
+    return `
+      <section class="px-4 pb-8 desk:px-8">
+        <div
+          class="group relative min-h-[340px] overflow-hidden rounded-[18px] bg-raised ring-1 ring-edge desk:min-h-[420px]"
+          data-card
+          data-provider="${escapeHtml(provider)}"
+          data-id="${escapeHtml(id)}"
+          data-title="${escapeHtml(title)}"
+          data-year="${escapeHtml(year || '')}"
+          data-poster="${escapeHtml(item.poster_url || item.poster || '')}"
+          data-type="${series ? 'series' : 'movie'}"
+          data-rating="${escapeHtml(rating || '')}"
+        >
+          <img
+            src="${escapeHtml(backdrop)}"
+            data-fallback-src="${escapeHtml(backdropFallback)}"
+            alt="${escapeHtml(title)}"
+            class="absolute inset-0 h-full w-full object-cover object-center transition-transform duration-700 ease-out group-hover:scale-[1.02]"
+          />
+          <div
+            class="absolute inset-0"
+            style="background: linear-gradient(90deg, rgba(8,8,12,0.92) 0%, rgba(8,8,12,0.68) 46%, rgba(8,8,12,0.18) 100%), linear-gradient(180deg, rgba(8,8,12,0.08) 0%, rgba(8,8,12,0.88) 100%);"
+          ></div>
+
+          <div class="relative z-10 flex min-h-[340px] max-w-[600px] flex-col justify-end p-6 desk:min-h-[420px] desk:p-10">
+            <div class="mb-2 flex flex-wrap items-center gap-2 text-[11.5px] font-bold tracking-widest text-white/75 uppercase">
+              <span class="rounded-full bg-brand/90 px-2.5 py-0.5 text-white">Featured</span>
+              ${year ? `<span>${escapeHtml(String(year))}</span>` : ''}
+              ${genres.length ? `<span>·</span><span>${escapeHtml(genres.slice(0, 3).join(' · '))}</span>` : ''}
+              ${rating ? `<span>·</span><span class="inline-flex items-center gap-1 text-amber-300">${iconHtml('starFilled', { size: 11 })} ${escapeHtml(rating)}</span>` : ''}
+            </div>
+
+            <a href="${escapeHtml(detailHref)}" data-nav class="block">
+              <h1 class="t-display desk:t-hero text-white drop-shadow-sm">${escapeHtml(title)}</h1>
+            </a>
+
+            ${
+              desc
+                ? `<p class="mt-2.5 line-clamp-2 text-[14.5px] leading-relaxed text-white/80">${escapeHtml(desc)}</p>`
+                : ''
+            }
+
+            <div class="mt-5 flex flex-wrap items-center gap-2.5">
+              <a
+                href="${escapeHtml(playHref)}"
+                data-nav
+                class="pill-selected inline-flex h-10 items-center gap-2 rounded-full px-5 text-[14px] font-semibold transition active:scale-[0.98]"
+              >
+                ${iconHtml('play', { size: 15 })}
+                <span>Play</span>
+              </a>
+              <a
+                href="${escapeHtml(detailHref)}"
+                data-nav
+                class="pill-glass inline-flex h-10 items-center gap-2 rounded-full px-4 text-[14px] font-semibold text-white transition hover:bg-white/22"
+              >
+                ${iconHtml('info', { size: 15 })}
+                <span>Details</span>
+              </a>
+              <button
+                type="button"
+                data-watchlist="${listed ? '1' : '0'}"
+                class="inline-flex h-10 items-center gap-2 rounded-full px-4 text-[14px] font-semibold transition ${
+                  listed ? 'pill-selected' : 'pill-glass text-white hover:bg-white/22'
+                }"
+              >
+                ${iconHtml(listed ? 'check' : 'bookmark', { size: 15 })}
+                <span>${listed ? 'Saved' : 'Watchlist'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>`;
+  }
+
+  function renderSuggestDropdown() {
+    if (!viewState.suggestOpen || !viewState.suggestions.length) {
+      suggestEl.hidden = true;
+      suggestEl.innerHTML = '';
       return;
     }
-    demoSlot.innerHTML = `
-      <div class="mx-4 mb-5 flex items-start gap-3 rounded-[12px] bg-raised/80 px-3.5 py-3 text-[13px] text-fg-2 ring-1 ring-edge desk:mx-8">
-        ${iconHtml('info', { size: 16, className: 'mt-0.5 text-fg-2' })}
-        <p class="min-w-0 flex-1 leading-relaxed">
-          Showing built-in preview titles. Connect the live Rust backend (<code class="text-fg">cargo run -- --web-api</code>) to stream the full multi-source catalog.
-          <button type="button" data-open-engine class="ml-1 font-semibold text-playing hover:opacity-80">Settings</button>
-        </p>
+    suggestEl.hidden = false;
+    suggestEl.innerHTML = viewState.suggestions
+      .slice(0, 7)
+      .map(
+        (s) => `
         <button
           type="button"
-          data-dismiss-demo
-          aria-label="Dismiss notice"
-          class="grid h-6 w-6 shrink-0 place-items-center rounded-full text-fg-2 hover:bg-fill-2 hover:text-fg"
+          data-browse-suggest-pick="${escapeHtml(String(s))}"
+          class="flex w-full items-center gap-2 px-3.5 py-2 text-left text-[13.5px] text-fg transition hover:bg-fill"
         >
-          ${iconHtml('x', { size: 14 })}
-        </button>
-      </div>`;
+          <span class="text-fg-3">${iconHtml('search', { size: 13 })}</span>
+          <span class="truncate">${escapeHtml(String(s))}</span>
+        </button>`,
+      )
+      .join('');
   }
 
-  function renderFilterBar() {
-    if (!filterSlot) return;
-    const pool = remoteSearchItems ?? rawCatalog;
-    const facets = extractMediaFacets(
-      pool.filter((it) => (kind === 'series' ? isSeriesItem(it) : !isSeriesItem(it))),
-      metaLookup,
-    );
-    const dirty = Boolean(
-      filterState.q ||
-        filterState.genre ||
-        filterState.year ||
-        filterState.sort !== 'trending' ||
-        filterState.provider !== 'moviebox',
-    );
-
-    const activeInput = filterSlot.querySelector('[data-browse-search]');
-    const hadFocus = activeInput && document.activeElement === activeInput;
-    const selStart = activeInput?.selectionStart ?? null;
-
-    filterSlot.innerHTML = `
-      <div class="flex flex-wrap items-center gap-2.5">
-        <div class="relative min-w-[220px] flex-1">
-          <span class="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-fg-2">
-            ${iconHtml('search', { size: 16 })}
-          </span>
-          <input
-            type="search"
-            data-browse-search
-            value="${escapeHtml(filterState.q)}"
-            placeholder="${kind === 'series' ? 'Search series, genres, cast…' : 'Search movies, genres, directors…'}"
-            aria-label="Search ${kind === 'series' ? 'series' : 'movies'}"
-            autocomplete="off"
-            spellcheck="false"
-            class="field h-10 w-full rounded-[10px] pr-9 pl-9 text-[14.5px]"
-          />
-          ${
-            filterState.q
-              ? `<button type="button" data-clear-search aria-label="Clear search" class="absolute top-1/2 right-2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-full bg-fill-3 text-fg-2 hover:text-fg">
-                   ${iconHtml('x', { size: 13 })}
-                 </button>`
-              : ''
-          }
-        </div>
-
-        <select aria-label="Catalog source" data-filter-provider class="field h-10 rounded-[10px] px-3 text-[13.5px] font-medium">
-          ${state.providers
-            .map(
-              (p) =>
-                `<option value="${escapeHtml(p.id)}" ${p.id === filterState.provider ? 'selected' : ''}>Source: ${escapeHtml(providerLabel(p.id))}</option>`,
-            )
-            .join('')}
-        </select>
-
-        <select aria-label="Release year" data-filter-year class="field h-10 rounded-[10px] px-3 text-[13.5px] font-medium">
-          <option value="">Any year</option>
-          <option value="2020s" ${filterState.year === '2020s' ? 'selected' : ''}>2020s</option>
-          <option value="2010s" ${filterState.year === '2010s' ? 'selected' : ''}>2010s</option>
-          <option value="2000s" ${filterState.year === '2000s' ? 'selected' : ''}>2000s</option>
-          ${facets.years
-            .map(
-              (y) =>
-                `<option value="${escapeHtml(y)}" ${String(filterState.year) === String(y) ? 'selected' : ''}>${escapeHtml(y)}</option>`,
-            )
-            .join('')}
-        </select>
-
-        <select aria-label="Sort by" data-filter-sort class="field h-10 rounded-[10px] px-3 text-[13.5px] font-medium">
-          ${SORTS.map(
-            (s) =>
-              `<option value="${escapeHtml(s.id)}" ${filterState.sort === s.id ? 'selected' : ''}>${escapeHtml(s.label)}</option>`,
-          ).join('')}
-        </select>
-
-        ${
-          dirty
-            ? `<button type="button" data-clear-filters class="h-10 rounded-[10px] px-3 text-[13.5px] font-semibold text-playing hover:bg-fill">
-                 Clear filters
-               </button>`
-            : ''
-        }
-      </div>
-
-      ${chipsHtml(
-        [{ id: '', label: 'All genres' }, ...facets.genres.map((g) => ({ id: g, label: g }))],
-        filterState.genre,
-        { attrName: 'data-filter-genre' },
-      )}`;
-
-    if (hadFocus) {
-      const nextInput = filterSlot.querySelector('[data-browse-search]');
-      if (nextInput) {
-        nextInput.focus();
-        if (selStart != null) {
-          try { nextInput.setSelectionRange(selStart, selStart); } catch { /* ignore */ }
-        }
-      }
+  function renderBody() {
+    if (viewState.loading) {
+      contentHost.innerHTML = posterGridSkeletonHtml(12);
+      return;
     }
-  }
-
-  function syncUrlQuietly() {
-    const base = kind === 'series' ? '/series' : '/movies';
-    const params = new URLSearchParams();
-    if (filterState.q) params.set('q', filterState.q);
-    if (filterState.genre) params.set('genre', filterState.genre);
-    if (filterState.year) params.set('year', filterState.year);
-    if (filterState.sort && filterState.sort !== 'trending') params.set('sort', filterState.sort);
-    if (filterState.provider && filterState.provider !== 'moviebox') params.set('provider', filterState.provider);
-    const qs = params.toString();
-    window.history.replaceState({}, '', qs ? `${base}?${qs}` : base);
-  }
-
-  function renderContent() {
-    if (ctx.signal?.aborted) return;
-    renderDemoBanner();
-    renderFilterBar();
-
-    const filtered = Boolean(
-      filterState.q ||
-        filterState.genre ||
-        filterState.year ||
-        filterState.sort !== 'trending' ||
-        filterState.provider !== 'moviebox',
-    );
-
-    const activePool = remoteSearchItems ?? rawCatalog;
-    const kindPool = activePool.filter((it) =>
-      kind === 'series' ? isSeriesItem(it) : !isSeriesItem(it),
-    );
-    // If a non-MovieBox provider doesn't tag media_type strictly on every search card, fall back gracefully.
-    const effectivePool = kindPool.length || filterState.provider === 'moviebox' ? kindPool : activePool;
-
-    // 1. Hero
-    if (!filtered && effectivePool.length) {
-      const candidates = heroCandidates(effectivePool, metrics, { limit: 4 });
-      const hero = candidates[0] || effectivePool[0];
-      setAmbientSeed(itemTitle(hero));
-      heroSlot.innerHTML = mediaHeroHtml(hero, kind);
-    } else {
-      heroSlot.innerHTML = '';
-    }
-
-    // 2. Shelves (when unfiltered)
-    if (!filtered) {
-      const shelves = [];
-
-      // Continue watching shelf
-      const cw = continueWatching(library.state.progress, { limit: 12 }).filter((entry) =>
-        kind === 'series'
-          ? entry.media_type === 'series' || Number(entry.season) > 0
-          : entry.media_type !== 'series' && !(Number(entry.season) > 0),
-      );
-      if (cw.length) {
-        shelves.push(
-          shelfHtml({
-            key: 'continue',
-            title: 'Continue watching',
-            subtitle: 'Pick up right where you left off',
-            actionHtml: `<a href="/tracker" data-nav class="text-[13.5px] font-semibold text-playing hover:opacity-80">History</a>`,
-            itemsHtml: cw
-              .map((entry) =>
-                posterCardHtml(
-                  {
-                    id: { provider: entry.provider, value: entry.id },
-                    title: entry.title,
-                    year: entry.year,
-                    poster_url: entry.poster_url,
-                    media_type: entry.media_type || kind,
-                  },
-                  {
-                    progress: entry,
-                    listed: library.isInWatchlist(entry.provider, entry.id),
-                    personalRating: library.ratingFor(entry.provider, entry.id),
-                  },
-                ),
-              )
-              .join(''),
-          }),
-        );
-      }
-
-      // Backend collection shelves filtered by movie/series
-      const rowMeta = {
-        trending: {
-          title: 'Trending now',
-          subtitle: kind === 'series' ? 'Series everyone is watching' : 'What everyone is watching',
-        },
-        fresh: {
-          title: kind === 'series' ? 'New seasons' : 'New releases',
-          subtitle: 'Recent arrivals worth your evening',
-        },
-        top_rated: {
-          title: 'Critically acclaimed',
-          subtitle: kind === 'series' ? 'Highest rated series' : 'Highest rated films',
-        },
-        most_watched: {
-          title: kind === 'series' ? 'Popular series' : 'Popular films',
-          subtitle: 'Most watched right now',
-        },
-      };
-
-      for (const row of collectionRows) {
-        const items = (row.items || []).filter((it) =>
-          kind === 'series' ? isSeriesItem(it) : !isSeriesItem(it),
-        );
-        if (items.length < 2) continue;
-        const copy = rowMeta[row.key] || { title: row.label, subtitle: row.hint || '' };
-        shelves.push(
-          shelfHtml({
-            key: row.key,
-            title: copy.title,
-            subtitle: copy.subtitle,
-            itemsHtml: items.slice(0, 18).map((it) => posterCardHtml(it, cardMetaFor(it))).join(''),
-          }),
-        );
-      }
-
-      // Personalized "Because you watched" shelf
-      const personal = becauseYouWatched(
-        effectivePool,
-        {
-          ratings: library.ratedWithGenres(state.meta),
-          watchlist: library.state.watchlist.map((w) => ({
-            ...w,
-            genres: cachedMeta(w.provider, w.id)?.genres || [],
-          })),
-          limit: 14,
-        },
-      );
-      if (personal.length >= 2) {
-        shelves.push(
-          shelfHtml({
-            key: 'for-you',
-            title: 'Because you watched',
-            subtitle: personal[0]?.reasons?.[0] || 'Picked from your watchlist and ratings',
-            itemsHtml: personal.map((p) => posterCardHtml(p.item, cardMetaFor(p.item))).join(''),
-          }),
-        );
-      }
-
-      shelvesSlot.innerHTML = shelves.join('');
-    } else {
-      shelvesSlot.innerHTML = '';
-    }
-
-    // 3. Main All Movies / All Series Grid
-    const visibleItems = filterAndSortMedia(effectivePool, {
-      kind: filterState.provider === 'moviebox' ? kind : '',
-      q: remoteSearchItems ? '' : filterState.q,
-      genre: filterState.genre,
-      year: filterState.year,
-      sort: filterState.sort,
-      metaLookup,
-      metrics,
-    });
-
-    const noun = kind === 'series' ? 'series' : visibleItems.length === 1 ? 'movie' : 'movies';
-    const gridTitle = filtered
-      ? filterState.q
-        ? `Results for “${filterState.q}”`
-        : 'Filtered results'
-      : kind === 'series'
-        ? 'All series'
-        : 'All movies';
-
-    if (!visibleItems.length) {
-      gridSlot.innerHTML = emptyStateHtml({
-        icon: kind === 'series' ? 'tv' : 'clapperboard',
-        title: `No ${kind === 'series' ? 'series' : 'movies'} match`,
-        message: 'Try clearing a filter, switching catalog source, or searching with fewer words.',
-        action: filtered
-          ? `<button type="button" data-clear-filters class="inline-flex h-10 items-center rounded-full bg-fill px-5 text-[14px] font-semibold text-fg hover:bg-fill-2">Reset filters</button>`
-          : '',
+    if (viewState.error) {
+      contentHost.innerHTML = errorStateHtml({
+        title: `Could not load ${isSeriesView ? 'series' : 'movies'}`,
+        message: viewState.error,
       });
-    } else {
-      gridSlot.innerHTML = `
-        ${sectionHeaderHtml(gridTitle, { subtitle: `${visibleItems.length} ${noun}` })}
-        ${cardGridHtml(visibleItems, cardMetaFor)}
+      contentHost.querySelector('[data-retry]')?.addEventListener('click', () => void loadCatalog());
+      return;
+    }
+
+    if (
+      viewState.provider !== 'moviebox' &&
+      !viewState.providerSearchItems.length &&
+      !viewState.genre
+    ) {
+      renderFacets([]);
+      contentHost.innerHTML = `
+        <div class="px-4 desk:px-8">
+          <div class="rounded-[16px] bg-raised/75 p-6 ring-1 ring-edge">
+            <h2 class="t-title">Browse ${escapeHtml(providerLabel(viewState.provider))}</h2>
+            <p class="mt-1 text-[14px] text-fg-2">
+              ${escapeHtml(providerLabel(viewState.provider))} uses MovieBox-TUI's direct catalog search. Pick a category below or enter a title above.
+            </p>
+            <div class="mt-4 flex flex-wrap gap-2">
+              ${DEFAULT_GENRES.slice(0, 12)
+                .map(
+                  (g) => `<button
+                    type="button"
+                    data-genre-chip="${escapeHtml(g)}"
+                    class="inline-flex h-8 items-center rounded-full bg-fill px-3.5 text-[13px] font-semibold text-fg hover:bg-fill-2"
+                  >${escapeHtml(g)}</button>`,
+                )
+                .join('')}
+            </div>
+          </div>
+        </div>`;
+      return;
+    }
+
+    const pool = filterByKind(allPoolItems());
+    renderFacets(pool);
+
+    if (isFiltered() || viewState.provider !== 'moviebox') {
+      const results = filterAndSortMedia(pool, {
+        kind,
+        genre: viewState.genre,
+        year: viewState.year,
+        sort: viewState.sort,
+        metaLookup,
+        metrics: viewState.collections?.metrics || {},
+      });
+
+      if (!results.length) {
+        contentHost.innerHTML = emptyStateHtml({
+          icon: isSeriesView ? 'tv' : 'film',
+          title: 'No matching titles',
+          message: 'Try clearing a filter or searching across providers.',
+          action: `<button type="button" data-clear-empty class="inline-flex h-10 items-center rounded-full bg-fill px-5 text-[14px] font-semibold text-fg hover:bg-fill-2">Clear filters</button>`,
+        });
+        contentHost.querySelector('[data-clear-empty]')?.addEventListener('click', () => {
+          viewState.genre = '';
+          viewState.year = '';
+          viewState.sort = 'trending';
+          yearSelect.value = '';
+          sortSelect.value = 'trending';
+          syncUrl();
+          renderBody();
+        });
+        return;
+      }
+
+      const canMore =
+        viewState.provider === 'moviebox'
+          ? viewState.hasMoreDiscover
+          : viewState.hasMoreProviderSearch;
+
+      contentHost.innerHTML = `
+        ${sectionHeaderHtml(`${results.length} ${results.length === 1 ? 'title' : 'titles'}`, {
+          subtitle: [viewState.genre, viewState.year, providerLabel(viewState.provider)]
+            .filter(Boolean)
+            .join(' · '),
+        })}
+        ${cardGridHtml(results, cardMetaFor)}
         ${
-          filterState.hasMore
+          canMore
             ? `<div class="mt-8 flex justify-center px-4">
                  <button
                    type="button"
                    data-load-more
-                   ${filterState.loadingMore ? 'disabled' : ''}
+                   ${viewState.loadingMore ? 'disabled' : ''}
                    class="inline-flex h-10 items-center gap-2 rounded-full bg-fill px-6 text-[14px] font-semibold text-fg transition hover:bg-fill-2 disabled:opacity-50"
                  >
-                   ${filterState.loadingMore ? iconHtml('loader2', { size: 15, className: 'animate-spin' }) : ''}
-                   <span>${filterState.loadingMore ? 'Loading…' : 'Load more'}</span>
+                   ${viewState.loadingMore ? iconHtml('loader2', { size: 15, className: 'animate-spin' }) : ''}
+                   <span>${viewState.loadingMore ? 'Loading more…' : 'Load more'}</span>
                  </button>
                </div>`
             : ''
         }`;
+      return;
     }
+
+    // Default MovieBox-TUI Curated Shelves + Paged Discover Grid
+    const cols = viewState.collections || {};
+    const trending = filterByKind(cols.trending || []);
+    const topRated = filterByKind(cols.top_rated || []);
+    const fresh = filterByKind(cols.fresh || []);
+    const mostWatched = filterByKind(cols.most_watched || []);
+    const heroItem = trending[0] || topRated[0] || fresh[0] || pool[0] || null;
+
+    const cw = continueWatching(library.state.progress || []).filter((entry) =>
+      isSeriesView
+        ? entry.media_type === 'series' || Number(entry.season) > 0
+        : entry.media_type !== 'series' && !(Number(entry.season) > 0),
+    );
+    const byw = becauseYouWatched({
+      library: library.state,
+      candidates: pool,
+      metaLookup,
+      limit: 12,
+    });
+
+    const shelves = [];
+    if (cw.length) {
+      shelves.push(
+        shelfHtml({
+          key: 'continue',
+          title: 'Continue Watching',
+          subtitle: 'Pick up right where you left off',
+          itemsHtml: cw
+            .slice(0, 12)
+            .map((entry) =>
+              posterCardHtml(
+                {
+                  id: entry.id,
+                  provider: entry.provider || 'moviebox',
+                  title: entry.title,
+                  year: entry.year,
+                  poster_url: entry.poster_url,
+                  media_type: entry.media_type,
+                  imdb_rating: entry.official_rating,
+                },
+                {
+                  listed: library.isInWatchlist(entry.provider || 'moviebox', entry.id),
+                  progress: entry,
+                  personalRating: library.ratingFor(entry.provider || 'moviebox', entry.id),
+                },
+              ),
+            )
+            .join(''),
+        }),
+      );
+    }
+
+    const pushShelf = (key, title, subtitle, list) => {
+      if (!list.length) return;
+      shelves.push(
+        shelfHtml({
+          key,
+          title,
+          subtitle,
+          itemsHtml: list.slice(0, 18).map((it) => posterCardHtml(it, cardMetaFor(it))).join(''),
+        }),
+      );
+    };
+
+    pushShelf(
+      'trending',
+      isSeriesView ? 'Trending Series' : 'Trending Now',
+      'Live from MovieBox-TUI collections',
+      trending.slice(heroItem === trending[0] ? 1 : 0),
+    );
+    if (byw) {
+      pushShelf('because', byw.heading, '', filterByKind(byw.items));
+    }
+    pushShelf('top-rated', 'Critically Acclaimed', 'Highest rated across the catalog', topRated);
+    pushShelf('fresh', 'New & Recent Releases', 'Latest additions', fresh);
+    pushShelf('popular', 'Most Watched', 'Popular streams this week', mostWatched);
+
+    if (pool.length) {
+      shelves.push(`
+        <section class="pt-2">
+          ${sectionHeaderHtml(isSeriesView ? 'All Series' : 'All Movies', {
+            subtitle: `${pool.length} titles loaded`,
+          })}
+          ${cardGridHtml(pool, cardMetaFor)}
+          ${
+            viewState.hasMoreDiscover
+              ? `<div class="mt-8 flex justify-center px-4">
+                   <button
+                     type="button"
+                     data-load-more
+                     ${viewState.loadingMore ? 'disabled' : ''}
+                     class="inline-flex h-10 items-center gap-2 rounded-full bg-fill px-6 text-[14px] font-semibold text-fg transition hover:bg-fill-2 disabled:opacity-50"
+                   >
+                     ${viewState.loadingMore ? iconHtml('loader2', { size: 15, className: 'animate-spin' }) : ''}
+                     <span>${viewState.loadingMore ? 'Loading more…' : 'Load more catalog'}</span>
+                   </button>
+                 </div>`
+              : ''
+          }
+        </section>`);
+    }
+
+    if (!heroItem && !shelves.length) {
+      contentHost.innerHTML = emptyStateHtml({
+        icon: isSeriesView ? 'tv' : 'film',
+        title: `No ${isSeriesView ? 'series' : 'movies'} found`,
+        message: 'Try searching by title using MovieBox-TUI search.',
+      });
+      return;
+    }
+
+    contentHost.innerHTML = `
+      ${heroBannerHtml(heroItem)}
+      <div class="space-y-9">${shelves.join('')}</div>`;
   }
 
   async function loadCatalog() {
-    filterState.page = 1;
-    filterState.hasMore = true;
-    remoteSearchItems = null;
+    viewState.loading = true;
+    viewState.error = '';
+    renderBody();
 
     try {
-      if (filterState.q) {
-        const found = await api.search(
-          { q: filterState.q, provider: filterState.provider, page: 1 },
-          { signal: ctx.signal },
-        );
-        remoteSearchItems = dedupeItems(Array.isArray(found) ? found : []);
-        filterState.hasMore = remoteSearchItems.length >= 12;
-        void ensureMeta(remoteSearchItems.slice(0, 24));
-      } else if (filterState.provider === 'moviebox') {
-        const useCached =
-          state.collections && Date.now() - state.collectionsFetchedAt < 180_000;
-        const [colRes, discRes] = await Promise.all([
-          useCached
-            ? Promise.resolve(state.collections)
-            : api.collections({ limit: 24, pages: 3 }, { signal: ctx.signal }).catch(() => null),
-          api.discover({ provider: 'moviebox', page: 1 }, { signal: ctx.signal }),
+      if (viewState.provider === 'moviebox') {
+        const [cols, disc1, disc2] = await Promise.all([
+          getCollectionsCached().catch(() => null),
+          api.discover({ provider: 'moviebox', page: 1 }, { signal: routeSignal }).catch(() => ({ items: [] })),
+          api.discover({ provider: 'moviebox', page: 2 }, { signal: routeSignal }).catch(() => ({ items: [] })),
         ]);
-        if (colRes) {
-          state.collections = colRes;
-          state.collectionsFetchedAt = Date.now();
-          collectionRows = colRes.rows || [];
-          metrics = { ...(colRes.metrics || {}) };
+        if (disposed || routeSignal?.aborted) return;
+        viewState.collections = cols || {};
+        const items1 = Array.isArray(disc1?.items) ? disc1.items : Array.isArray(disc1) ? disc1 : [];
+        const items2 = Array.isArray(disc2?.items) ? disc2.items : Array.isArray(disc2) ? disc2 : [];
+        viewState.discoverItems = dedupeItems([...items1, ...items2]);
+        viewState.discoverPage = items2.length ? 2 : 1;
+        viewState.hasMoreDiscover = (items2.length || items1.length) > 0;
+        if (!cols && !viewState.discoverItems.length) {
+          throw new Error('Could not reach catalog endpoints.');
         }
-        metrics = { ...metrics, ...(discRes?.metrics || {}) };
-        const combined = [
-          ...(discRes?.items || []),
-          ...collectionRows.flatMap((r) => r.items || []),
-        ];
-        rawCatalog = dedupeItems(combined);
-        filterState.hasMore = (discRes?.items || []).length >= 10;
-        void ensureMeta(rawCatalog.slice(0, 30));
-      } else {
-        const seedTerm = kind === 'series' ? 'Season' : '2024';
-        const found = await api.search(
-          { q: seedTerm, provider: filterState.provider, page: 1 },
-          { signal: ctx.signal },
+      } else if (viewState.genre) {
+        const res = await api.search(
+          { q: viewState.genre, provider: viewState.provider, page: 1 },
+          { signal: routeSignal },
         );
-        rawCatalog = dedupeItems(Array.isArray(found) ? found : []);
-        collectionRows = [];
-        filterState.hasMore = rawCatalog.length >= 10;
-        void ensureMeta(rawCatalog.slice(0, 24));
+        if (disposed || routeSignal?.aborted) return;
+        const list = Array.isArray(res) ? res : Array.isArray(res?.items) ? res.items : [];
+        viewState.providerSearchItems = dedupeItems(
+          list.map((it) => ({ ...it, provider: itemProvider(it) || viewState.provider })),
+        );
+        viewState.providerSearchPage = 1;
+        viewState.hasMoreProviderSearch = list.length >= 10;
+      } else {
+        viewState.providerSearchItems = [];
+        viewState.hasMoreProviderSearch = false;
       }
 
-      if (!ctx.signal?.aborted) renderContent();
+      viewState.loading = false;
+      renderBody();
+      void ensureMeta(allPoolItems().slice(0, 48));
     } catch (err) {
-      if (ctx.signal?.aborted) return;
-      heroSlot.innerHTML = '';
-      shelvesSlot.innerHTML = '';
-      renderDemoBanner();
-      renderFilterBar();
-      gridSlot.innerHTML = errorStateHtml({
-        title: `Couldn’t load ${providerLabel(filterState.provider)}`,
-        message: displayUiText(err.message),
-      });
+      if (disposed || routeSignal?.aborted) return;
+      viewState.loading = false;
+      viewState.error = err?.message || 'Unable to load catalog from backend.';
+      renderBody();
     }
   }
 
-  async function loadMorePage() {
-    if (filterState.loadingMore || !filterState.hasMore) return;
-    filterState.loadingMore = true;
-    renderContent();
-    const nextPage = filterState.page + 1;
+  async function loadMoreCatalog() {
+    if (viewState.loadingMore) return;
+    viewState.loadingMore = true;
+    renderBody();
+
     try {
-      let more = [];
-      if (filterState.q) {
-        more = await api.search(
-          { q: filterState.q, provider: filterState.provider, page: nextPage },
-          { signal: ctx.signal },
+      if (viewState.provider === 'moviebox') {
+        const nextPage = viewState.discoverPage + 1;
+        const resp = await api.discover(
+          { provider: 'moviebox', page: nextPage },
+          { signal: routeSignal },
         );
-        remoteSearchItems = dedupeItems([...(remoteSearchItems || []), ...(more || [])]);
-      } else if (filterState.provider === 'moviebox') {
-        const res = await api.discover({ provider: 'moviebox', page: nextPage }, { signal: ctx.signal });
-        more = res?.items || [];
-        metrics = { ...metrics, ...(res?.metrics || {}) };
-        rawCatalog = dedupeItems([...rawCatalog, ...more]);
-      } else {
-        const seedTerm = kind === 'series' ? 'Season' : '2024';
-        more = await api.search(
-          { q: seedTerm, provider: filterState.provider, page: nextPage },
-          { signal: ctx.signal },
+        if (disposed || routeSignal?.aborted) return;
+        const batch = Array.isArray(resp?.items) ? resp.items : Array.isArray(resp) ? resp : [];
+        const before = viewState.discoverItems.length;
+        viewState.discoverItems = dedupeItems([...viewState.discoverItems, ...batch]);
+        viewState.discoverPage = nextPage;
+        viewState.hasMoreDiscover = batch.length > 0 && viewState.discoverItems.length > before;
+        void ensureMeta(batch);
+      } else if (viewState.genre) {
+        const nextPage = viewState.providerSearchPage + 1;
+        const resp = await api.search(
+          { q: viewState.genre, provider: viewState.provider, page: nextPage },
+          { signal: routeSignal },
         );
-        rawCatalog = dedupeItems([...rawCatalog, ...(more || [])]);
+        if (disposed || routeSignal?.aborted) return;
+        const batch = Array.isArray(resp) ? resp : Array.isArray(resp?.items) ? resp.items : [];
+        const stamped = batch.map((it) => ({
+          ...it,
+          provider: itemProvider(it) || viewState.provider,
+        }));
+        const before = viewState.providerSearchItems.length;
+        viewState.providerSearchItems = dedupeItems([
+          ...viewState.providerSearchItems,
+          ...stamped,
+        ]);
+        viewState.providerSearchPage = nextPage;
+        viewState.hasMoreProviderSearch =
+          batch.length >= 10 && viewState.providerSearchItems.length > before;
+        void ensureMeta(stamped);
       }
-      filterState.page = nextPage;
-      filterState.hasMore = Array.isArray(more) && more.length >= 8;
-      if (more?.length) void ensureMeta(more.slice(0, 24));
-    } catch {
-      filterState.hasMore = false;
-    } finally {
-      filterState.loadingMore = false;
-      if (!ctx.signal?.aborted) renderContent();
+    } catch {}
+    if (!disposed && !routeSignal?.aborted) {
+      viewState.loadingMore = false;
+      renderBody();
     }
   }
 
-  // Interactive handlers scoped to container
-  container.addEventListener('input', (event) => {
-    const input = event.target.closest?.('[data-browse-search]');
-    if (!input) return;
-    filterState.q = input.value;
-    syncUrlQuietly();
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => {
-      if (!filterState.q.trim()) {
-        remoteSearchItems = null;
-        if (rawCatalog.length) renderContent();
-        else void loadCatalog();
-      } else {
-        void loadCatalog();
-      }
-    }, 320);
-  });
-
-  container.addEventListener('change', (event) => {
-    const target = event.target;
-    if (target.matches('[data-filter-provider]')) {
-      filterState.provider = target.value;
-      setProvider(target.value);
-      syncUrlQuietly();
-      void loadCatalog();
-    } else if (target.matches('[data-filter-year]')) {
-      filterState.year = target.value;
-      syncUrlQuietly();
-      renderContent();
-    } else if (target.matches('[data-filter-sort]')) {
-      filterState.sort = target.value;
-      syncUrlQuietly();
-      renderContent();
+  async function fetchBrowseSuggestions(raw) {
+    const trimmed = raw.trim();
+    if (trimmed.length < 2 || api.state.supports.suggest === false) {
+      viewState.suggestions = [];
+      viewState.suggestOpen = false;
+      renderSuggestDropdown();
+      return;
     }
+    const sId = ++suggestCounter;
+    try {
+      const res = await api.suggest({ q: trimmed }, { signal: routeSignal });
+      if (disposed || routeSignal?.aborted || sId !== suggestCounter) return;
+      api.markSupport('suggest', true);
+      const list = Array.isArray(res?.suggestions) ? res.suggestions : Array.isArray(res) ? res : [];
+      viewState.suggestions = list;
+      viewState.suggestOpen = list.length > 0 && document.activeElement === searchInput;
+      renderSuggestDropdown();
+    } catch (err) {
+      if (err?.status === 404 || err?.status === 501) {
+        api.markSupport('suggest', false);
+      }
+    }
+  }
+
+  function submitToMovieBoxSearch(qText) {
+    const qVal = String(qText || '').trim();
+    const params = new URLSearchParams();
+    if (qVal) params.set('q', qVal);
+    if (viewState.provider && viewState.provider !== 'moviebox') {
+      params.set('provider', viewState.provider);
+    }
+    params.set('type', isSeriesView ? 'series' : 'movie');
+    void router.navigate(`/search?${params.toString()}`);
+  }
+
+  searchInput.addEventListener('input', () => {
+    clearTimeout(suggestTimer);
+    suggestTimer = setTimeout(() => void fetchBrowseSuggestions(searchInput.value), 180);
   });
 
-  container.addEventListener('click', (event) => {
-    const target = event.target instanceof Element ? event.target : null;
+  searchInput.addEventListener('blur', () => {
+    setTimeout(() => {
+      if (disposed) return;
+      viewState.suggestOpen = false;
+      renderSuggestDropdown();
+    }, 160);
+  });
+
+  root.querySelector('[data-browse-search-form]')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitToMovieBoxSearch(searchInput.value);
+  });
+
+  yearSelect.addEventListener('change', () => {
+    viewState.year = yearSelect.value;
+    syncUrl();
+    renderBody();
+  });
+
+  sortSelect.addEventListener('change', () => {
+    viewState.sort = sortSelect.value;
+    syncUrl();
+    renderBody();
+  });
+
+  resetBtn.addEventListener('click', () => {
+    viewState.genre = '';
+    viewState.year = '';
+    viewState.sort = 'trending';
+    yearSelect.value = '';
+    sortSelect.value = 'trending';
+    syncUrl();
+    if (viewState.provider !== 'moviebox') void loadCatalog();
+    else renderBody();
+  });
+
+  root.addEventListener('click', (e) => {
+    const target = e.target instanceof Element ? e.target : null;
     if (!target) return;
 
-    if (target.closest('[data-dismiss-demo]')) {
-      try { sessionStorage.setItem(DEMO_DISMISSED_KEY, '1'); } catch { /* ignore */ }
-      renderDemoBanner();
+    const sugBtn = target.closest('[data-browse-suggest-pick]');
+    if (sugBtn) {
+      submitToMovieBoxSearch(sugBtn.dataset.browseSuggestPick || '');
       return;
     }
 
-    if (target.closest('[data-open-engine]')) {
-      openEngineSheet();
-      return;
-    }
-
-    if (target.closest('[data-clear-search]')) {
-      filterState.q = '';
-      remoteSearchItems = null;
-      syncUrlQuietly();
-      if (rawCatalog.length) renderContent();
-      else void loadCatalog();
-      return;
-    }
-
-    if (target.closest('[data-clear-filters]')) {
-      filterState.q = '';
-      filterState.genre = '';
-      filterState.year = '';
-      filterState.sort = 'trending';
-      filterState.provider = 'moviebox';
-      setProvider('moviebox');
-      remoteSearchItems = null;
-      syncUrlQuietly();
-      void loadCatalog();
-      return;
-    }
-
-    const genreBtn = target.closest('[data-filter-genre]');
+    const genreBtn = target.closest('[data-genre-chip]');
     if (genreBtn) {
-      filterState.genre = genreBtn.dataset.filterGenre || '';
-      syncUrlQuietly();
-      renderContent();
+      viewState.genre = genreBtn.dataset.genreChip || '';
+      syncUrl();
+      if (viewState.provider !== 'moviebox') void loadCatalog();
+      else renderBody();
       return;
     }
 
     if (target.closest('[data-load-more]')) {
-      void loadMorePage();
-      return;
-    }
-
-    if (target.closest('[data-retry]')) {
-      void loadCatalog();
+      void loadMoreCatalog();
     }
   });
 
-  const onMetaOrLibrary = () => {
-    if (!ctx.signal?.aborted) renderContent();
+  const onSync = () => {
+    if (!disposed && !viewState.loading) renderBody();
   };
-  const unsubLib = library.subscribe(onMetaOrLibrary);
-  window.addEventListener('ifallhub:meta', onMetaOrLibrary);
-  ctx.signal?.addEventListener('abort', () => {
-    clearTimeout(searchTimer);
-    unsubLib();
-    window.removeEventListener('ifallhub:meta', onMetaOrLibrary);
-  });
+  unsubLibrary = library.subscribe(onSync);
+  window.addEventListener('ifallhub:meta', onSync, { signal: routeSignal });
 
   await loadCatalog();
+
+  routeSignal?.addEventListener(
+    'abort',
+    () => {
+      disposed = true;
+      clearTimeout(suggestTimer);
+      if (unsubLibrary) unsubLibrary();
+    },
+    { once: true },
+  );
 }
 
-export async function renderMovies(container, ctx) {
-  return renderMediaBrowse(container, ctx, 'movie');
+export function renderMovies(root, route) {
+  return renderMediaBrowse(root, route, 'movie');
 }
 
-export async function renderSeries(container, ctx) {
-  return renderMediaBrowse(container, ctx, 'series');
+export function renderSeries(root, route) {
+  return renderMediaBrowse(root, route, 'series');
 }

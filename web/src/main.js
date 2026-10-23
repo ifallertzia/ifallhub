@@ -22,12 +22,13 @@ import {
   toggleTheme,
 } from './state.js';
 import { iconHtml, logoFullHtml, logoMarkHtml } from './ui/icons.js';
-import { openBetaPlayerSheet, openEngineSheet } from './ui/sheets.js';
-import { renderDetails, renderWatch } from './views/details.js';
+import { openEngineSheet } from './ui/sheets.js';
+import { renderDetails } from './views/details.js';
 import { renderMediaBrowse, renderMovies, renderSeries } from './views/media-browse.js';
 import { renderMyList } from './views/mylist.js';
 import { renderSearch } from './views/search.js';
 import { renderTracker } from './views/tracker.js';
+import { renderWatch } from './views/watch.js';
 
 function renderShellMarkup() {
   const [c0, c1, c2] = state.ambientColors;
@@ -88,6 +89,11 @@ function renderShellMarkup() {
             >
               ${iconHtml('x', { size: 12 })}
             </button>
+            <div
+              id="sidebar-suggest"
+              hidden
+              class="menu-glass absolute top-[calc(100%+6px)] right-0 left-0 z-40 overflow-hidden rounded-[10px] py-1"
+            ></div>
           </div>
         </div>
 
@@ -392,24 +398,16 @@ function syncTopbarLcd() {
           Continue watching${escapeHtml(epTag)} · ${pct}%
         </div>
       </a>
-      <button
-        type="button"
-        data-lcd-resume
-        data-provider="${escapeHtml(entry.provider)}"
-        data-id="${escapeHtml(entry.id)}"
-        data-title="${escapeHtml(entry.title)}"
-        data-year="${escapeHtml(entry.year || '')}"
-        data-poster="${escapeHtml(entry.poster_url || '')}"
-        data-type="${series ? 'series' : 'movie'}"
-        data-season="${escapeHtml(String(entry.season || 0))}"
-        data-episode="${escapeHtml(String(entry.episode || 0))}"
+      <a
+        href="${escapeHtml(router.watchPath(entry.provider, entry.id, { season: Number(entry.season) || 0, episode: Number(entry.episode) || 0 }))}"
+        data-nav
         aria-label="Resume ${escapeHtml(entry.title)}"
-        class="mr-2 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-fill-2 text-fg transition hover:bg-primary hover:text-on-primary"
+        class="pill-selected mr-2 grid h-7 w-7 shrink-0 place-items-center rounded-full transition"
       >
         ${iconHtml('play', { size: 12 })}
-      </button>
+      </a>
       <div class="pointer-events-none absolute inset-x-0 bottom-0 h-[2px] bg-fill-2">
-        <div class="h-full bg-fg/75" style="width:${pct}%"></div>
+        <div class="h-full bg-brand" style="width:${pct}%"></div>
       </div>`;
     return;
   }
@@ -460,25 +458,83 @@ document.addEventListener(
   true,
 );
 
-// 2. Sidebar live search routing
+// 2. Sidebar live search + MovieBox-TUI `/api/suggest`
+const sidebarSuggest = document.getElementById('sidebar-suggest');
 let sidebarTimer = 0;
+let sidebarSuggestTimer = 0;
+
+function hideSidebarSuggest() {
+  if (sidebarSuggest) {
+    sidebarSuggest.hidden = true;
+    sidebarSuggest.innerHTML = '';
+  }
+}
+
+function searchHrefFor(qText) {
+  const clean = String(qText || '').trim();
+  const params = new URLSearchParams();
+  if (clean) params.set('q', clean);
+  if (state.provider && state.provider !== 'moviebox') params.set('provider', state.provider);
+  const qs = params.toString();
+  return `/search${qs ? `?${qs}` : ''}`;
+}
+
 sidebarSearch?.addEventListener('input', () => {
   const val = sidebarSearch.value;
   if (sidebarSearchClear) sidebarSearchClear.hidden = !val;
+
+  clearTimeout(sidebarSuggestTimer);
+  sidebarSuggestTimer = setTimeout(async () => {
+    const clean = val.trim();
+    if (clean.length < 2 || api.state.supports.suggest === false || !sidebarSuggest) {
+      hideSidebarSuggest();
+      return;
+    }
+    try {
+      const res = await api.suggest({ q: clean });
+      api.markSupport('suggest', true);
+      const list = Array.isArray(res?.suggestions) ? res.suggestions : Array.isArray(res) ? res : [];
+      if (!list.length || document.activeElement !== sidebarSearch) {
+        hideSidebarSuggest();
+        return;
+      }
+      sidebarSuggest.hidden = false;
+      sidebarSuggest.innerHTML = list
+        .slice(0, 6)
+        .map(
+          (s) => `<button
+            type="button"
+            data-side-suggest="${escapeHtml(String(s))}"
+            class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-fg transition hover:bg-fill"
+          >
+            <span class="text-fg-3">${iconHtml('search', { size: 12 })}</span>
+            <span class="truncate">${escapeHtml(String(s))}</span>
+          </button>`,
+        )
+        .join('');
+    } catch (err) {
+      if (err?.status === 404 || err?.status === 501) api.markSupport('suggest', false);
+    }
+  }, 180);
+
   clearTimeout(sidebarTimer);
   sidebarTimer = setTimeout(() => {
     const clean = val.trim();
-    if (clean) router.navigate(`/search?q=${encodeURIComponent(clean)}`);
-    else if (window.location.pathname.startsWith('/search')) router.navigate('/search');
-  }, 240);
+    if (clean) void router.navigate(searchHrefFor(clean));
+    else if (window.location.pathname.startsWith('/search')) void router.navigate(searchHrefFor(''));
+  }, 280);
+});
+
+sidebarSearch?.addEventListener('blur', () => {
+  setTimeout(hideSidebarSuggest, 160);
 });
 
 sidebarSearch?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault();
     clearTimeout(sidebarTimer);
-    const clean = sidebarSearch.value.trim();
-    router.navigate(clean ? `/search?q=${encodeURIComponent(clean)}` : '/search');
+    hideSidebarSuggest();
+    void router.navigate(searchHrefFor(sidebarSearch.value));
   }
 });
 
@@ -486,7 +542,8 @@ sidebarSearchClear?.addEventListener('click', () => {
   if (!sidebarSearch) return;
   sidebarSearch.value = '';
   sidebarSearchClear.hidden = true;
-  if (window.location.pathname.startsWith('/search')) router.navigate('/search');
+  hideSidebarSuggest();
+  if (window.location.pathname.startsWith('/search')) void router.navigate(searchHrefFor(''));
   sidebarSearch.focus();
 });
 
@@ -528,21 +585,12 @@ document.addEventListener('click', async (event) => {
     return;
   }
 
-  const lcdResume = target.closest('[data-lcd-resume]');
-  if (lcdResume) {
-    void openBetaPlayerSheet({
-      provider: lcdResume.dataset.provider || state.provider,
-      id: lcdResume.dataset.id,
-      season: Number(lcdResume.dataset.season) || 0,
-      episode: Number(lcdResume.dataset.episode) || 0,
-      item: {
-        id: { provider: lcdResume.dataset.provider, value: lcdResume.dataset.id },
-        title: lcdResume.dataset.title,
-        year: lcdResume.dataset.year,
-        poster_url: lcdResume.dataset.poster,
-        media_type: lcdResume.dataset.type,
-      },
-    });
+  const sideSug = target.closest('[data-side-suggest]');
+  if (sideSug) {
+    const picked = sideSug.dataset.sideSuggest || '';
+    if (sidebarSearch) sidebarSearch.value = picked;
+    hideSidebarSuggest();
+    void router.navigate(searchHrefFor(picked));
     return;
   }
 
@@ -558,7 +606,7 @@ document.addEventListener('click', async (event) => {
     return;
   }
 
-  // Watchlist Bookmark Toggle on any card / hero / detail header
+  // Watchlist Bookmark Toggle on any card / hero
   const wlBtn = target.closest('[data-watchlist]');
   if (wlBtn) {
     event.preventDefault();
@@ -575,32 +623,6 @@ document.addEventListener('click', async (event) => {
     };
     const listed = await library.toggleWatchlist(entry);
     toast(listed ? `Saved “${entry.title}” to Watchlist` : `Removed “${entry.title}” from Watchlist`);
-    return;
-  }
-
-  // Quick Try Play on Hero or Progress Row
-  const tryPlayBtn = target.closest('[data-try-play]');
-  if (tryPlayBtn) {
-    event.preventDefault();
-    event.stopPropagation();
-    const card = tryPlayBtn.closest('[data-card]');
-    if (!card) return;
-    const series = isSeriesItem({ media_type: card.dataset.type });
-    const season = Number(tryPlayBtn.dataset.season ?? card.dataset.season) || (series ? 1 : 0);
-    const episode = Number(tryPlayBtn.dataset.episode ?? card.dataset.episode) || (series ? 1 : 0);
-    void openBetaPlayerSheet({
-      provider: card.dataset.provider || state.provider,
-      id: card.dataset.id,
-      season,
-      episode,
-      item: {
-        id: { provider: card.dataset.provider, value: card.dataset.id },
-        title: card.dataset.title,
-        year: card.dataset.year,
-        poster_url: card.dataset.poster,
-        media_type: card.dataset.type,
-      },
-    });
   }
 });
 

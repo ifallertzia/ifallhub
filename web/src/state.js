@@ -123,6 +123,17 @@ export function cachedDetails(provider, id) {
   return state.detailsCache.get(`${provider}:${id}`) || null;
 }
 
+export async function getCollectionsCached({ maxAgeMs = 60_000 } = {}) {
+  const now = Date.now();
+  if (state.collections && now - state.collectionsFetchedAt < maxAgeMs) {
+    return state.collections;
+  }
+  const cols = await api.collections();
+  state.collections = cols;
+  state.collectionsFetchedAt = Date.now();
+  return cols;
+}
+
 /**
  * Batch-fetches `/api/meta` for items missing ratings/genres and dispatches
  * `ifallhub:meta` when new metadata arrives so visible cards can patch cleanly.
