@@ -1,137 +1,43 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark" suppresshydrationwarning>
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#09090d" />
-    <meta name="description" content="Ifallhub — movies, series and anime with official ratings, recommendations, watchlist and a watch tracker." />
-    <title>Ifallhub — Movies, Series &amp; Anime</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#000000" />
+    <meta
+      name="description"
+      content="Ifallhub — Watch movies and series across sources with instant streaming, subtitles, VLC handoff, and downloads."
+    />
+    <title>Ifallhub — Movies &amp; Series</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 36 36'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0%25' stop-color='%23ff5b6e'/%3E%3Cstop offset='100%25' stop-color='%23fa233b'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='36' height='36' rx='8.5' fill='url(%23g)'/%3E%3Cpath d='M14 10.5v15l12-7.5z' fill='%23fff'/%3E%3C/svg%3E"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      try {
+        var t = localStorage.getItem('ifallhub_theme') || 'dark';
+        var resolved =
+          t === 'system'
+            ? window.matchMedia('(prefers-color-scheme: light)').matches
+              ? 'light'
+              : 'dark'
+            : t;
+        document.documentElement.dataset.theme = resolved === 'light' ? 'light' : 'dark';
+      } catch (e) {
+        document.documentElement.dataset.theme = 'dark';
+      }
+    </script>
   </head>
-  <body>
-    <div class="app-shell">
-      <aside class="sidebar" aria-label="Main navigation">
-        <a class="brand" href="/" data-nav aria-label="Ifallhub home">
-          <span class="brand-mark"><span></span><span></span><span></span></span>
-          <span class="brand-copy">
-            <strong>ifallhub</strong>
-            <small>STREAM + TRACK</small>
-          </span>
-        </a>
-
-        <p class="sidebar-label">WORKSPACE</p>
-        <nav class="side-nav">
-          <a class="nav-item is-active" href="/" data-nav data-nav-item="home">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3.5 10.5 8.5-7 8.5 7v9a1 1 0 0 1-1 1h-5.2v-6.1H9.7v6.1H4.5a1 1 0 0 1-1-1z" /></svg>
-            <span>Discover</span>
-          </a>
-          <a class="nav-item" href="/search" data-nav data-nav-item="search">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.6" /><path d="m16 16 4.3 4.3" /></svg>
-            <span>Search</span>
-          </a>
-          <a class="nav-item" href="/mylist" data-nav data-nav-item="mylist">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h9l4 4v12H6z" /><path d="M9 12h7M9 16h5" /></svg>
-            <span>My List</span>
-            <span class="nav-count" id="nav-list-count" hidden></span>
-          </a>
-          <a class="nav-item" href="/tracker" data-nav data-nav-item="tracker">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2" /></svg>
-            <span>Tracker</span>
-          </a>
-          <button class="nav-item nav-button" type="button" id="sidebar-music">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>
-            <span>Music</span>
-          </button>
-        </nav>
-
-        <p class="sidebar-label provider-label">SOURCES</p>
-        <div class="source-stack" id="source-stack"></div>
-
-        <div class="sidebar-bottom">
-          <div class="local-card">
-            <div class="local-card-icon">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="12" rx="2" /><path d="M8 20h8M12 16.5V20M8 10.5l2.5 2.5 5-5" /></svg>
-            </div>
-            <div>
-              <strong>Your sources, your screen.</strong>
-              <p>Watchlist, ratings aur progress engine pe save hote hain.</p>
-            </div>
-          </div>
-          <p class="sidebar-foot"><span class="tiny-lock">◈</span> No account · No tracking</p>
-        </div>
-      </aside>
-
-      <main class="main-content" id="top">
-        <header class="topbar">
-          <div class="breadcrumb"><span>Workspace</span><span class="crumb-slash">/</span><strong id="crumb-current">Discover</strong></div>
-
-          <form class="searchbox" id="search-form" role="search">
-            <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.6" /><path d="m16 16 4.3 4.3" /></svg>
-            <input id="search-input" type="search" placeholder="Search movies, series, anime…  (Ctrl+K)" autocomplete="off" aria-label="Search titles" />
-            <button class="search-clear" id="clear-search" type="button" aria-label="Clear search" hidden>×</button>
-            <div class="search-suggestions" id="search-suggestions" hidden></div>
-          </form>
-
-          <div class="topbar-right">
-            <span class="engine-status" id="engine-status" data-state="checking">
-              <span class="status-light"></span><span id="engine-status-text">Connecting…</span>
-            </span>
-            <button class="icon-button" type="button" id="music-button" aria-label="Music" title="Music">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>
-            </button>
-            <button class="icon-button" type="button" id="help-button" aria-label="How to connect the engine" title="How to connect the engine">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.7" /><path d="M9.7 9.2a2.4 2.4 0 1 1 4.2 1.6c-.9 1-1.9 1.1-1.9 2.5M12 16.8h.01" /></svg>
-            </button>
-          </div>
-        </header>
-
-        <div id="view" data-view="home"></div>
-
-        <footer class="page-footer">
-          <span>Powered by <strong>Ifallhub</strong></span>
-          <span>Streams aur ratings aapke configured sources se aate hain.</span>
-        </footer>
-      </main>
-    </div>
-
-    <dialog class="modal help-dialog" id="help-dialog" aria-label="Connect your engine">
-      <div class="modal-panel">
-        <button class="dialog-close" type="button" data-close aria-label="Close">×</button>
-        <p class="kicker">LOCAL ENGINE</p>
-        <h2>Connect your Ifallhub engine</h2>
-        <p>This UI reads titles, ratings aur streams from the local Ifallhub API. Start it, then the whole site goes live.</p>
-        <div class="command-block"><span>Terminal 1 · Rust API</span><code>cargo run -- --web-api</code></div>
-        <div class="command-block"><span>Terminal 2 · Web UI</span><code>IFALLHUB_API_URL=http://127.0.0.1:8787 npm run dev</code></div>
-        <div class="callout"><span>i</span><p>Watchlist, ratings aur watch progress server pe save hote hain (<code>/api/library</code>) aur SSE se live sync hote hain.</p></div>
-      </div>
-    </dialog>
-
-    <dialog class="modal help-dialog" id="music-dialog" aria-label="IfallMusic">
-      <div class="modal-panel">
-        <button class="dialog-close" type="button" data-close aria-label="Close">×</button>
-        <p class="kicker">MUSIC</p>
-        <h2>Need a soundtrack?</h2>
-        <p>Try IfallMusic for high-quality music and downloading songs.</p>
-        <a class="primary-button" href="https://sidify.vercel.app" target="_blank" rel="noopener noreferrer">Open IfallMusic ↗</a>
-        <p class="muted small">sidify.vercel.app</p>
-      </div>
-    </dialog>
-
-    <dialog class="modal help-dialog" id="access-dialog" aria-label="Access key required">
-      <div class="modal-panel">
-        <button class="dialog-close" type="button" data-close aria-label="Close">×</button>
-        <p class="kicker">PRIVATE DEPLOYMENT</p>
-        <h2>Enter your access key</h2>
-        <p>This deployment is protected. Paste the access key configured by its operator.</p>
-        <form id="access-form" class="access-form">
-          <input type="password" id="access-input" placeholder="Access key" autocomplete="current-password" required />
-          <button class="primary-button" type="submit">Unlock</button>
-        </form>
-        <div class="callout"><span>i</span><p>The key stays in this browser and is only sent with same-origin API requests.</p></div>
-      </div>
-    </dialog>
-
-    <div class="toast" id="toast" role="status" aria-live="polite"></div>
-
+  <body class="bg-canvas text-fg antialiased">
+    <div id="app"></div>
+    <div id="sheets-root"></div>
+    <div id="toasts-root"></div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

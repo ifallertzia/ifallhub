@@ -1,623 +1,520 @@
 import { defineConfig, loadEnv } from 'vite';
+import tailwindcss from '@tailwindcss/vite';
 
-// ---------------------------------------------------------------------------
-// Demo data. Only used when no API URL is configured, so `npm run dev` renders
-// the full UI offline. Production builds ship no API of their own.
-// ---------------------------------------------------------------------------
+// Build-time neutral fallback catalog used ONLY when Vite runs with `--mode demo`
+// (`npm run dev:demo`) so contributors and live previews can exercise every
+// Sidify-V2 Movies/Series view, shelf, filter, and sheet without running the
+// Rust engine. Production builds (`npm run build`) NEVER include this plugin and
+// connect directly to Ifallhub's `/api/*` backend.
+function makeMockApiPlugin() {
+  const sampleCatalog = [
+    {
+      id: { provider: 'moviebox', value: 'demo-dune-part-two' },
+      title: 'Dune: Part Two',
+      year: '2024',
+      media_type: 'movie',
+      poster_url: 'https://image.tmdb.org/t/p/w500/1pdfLvkbY9ohJlCjQH2CZjjYVvJ.jpg',
+      backdrop_url: 'https://image.tmdb.org/t/p/w1280/xOMo8BRK7PfcJv9JCnx7s5hj0PX.jpg',
+      imdb_rating: '8.5',
+      duration: '166m',
+      genres: ['Science Fiction', 'Adventure', 'Drama'],
+      director: 'Denis Villeneuve',
+      cast: ['Timothée Chalamet', 'Zendaya', 'Rebecca Ferguson', 'Javier Bardem'],
+      tagline: 'Long live the fighters.',
+      description: 'Follow the mythic journey of Paul Atreides as he unites with Chani and the Fremen while on a path of revenge against the conspirators who destroyed his family.',
+    },
+    {
+      id: { provider: 'moviebox', value: 'demo-interstellar' },
+      title: 'Interstellar',
+      year: '2014',
+      media_type: 'movie',
+      poster_url: 'https://image.tmdb.org/t/p/w500/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg',
+      backdrop_url: 'https://image.tmdb.org/t/p/w1280/xJHokMbljvjADYdit5fK5VQsXEG.jpg',
+      imdb_rating: '8.7',
+      duration: '169m',
+      genres: ['Adventure', 'Drama', 'Science Fiction'],
+      director: 'Christopher Nolan',
+      cast: ['Matthew McConaughey', 'Anne Hathaway', 'Jessica Chastain', 'Michael Caine'],
+      tagline: 'Mankind was born on Earth. It was never meant to die here.',
+      description: 'The adventures of a group of explorers who make use of a newly discovered wormhole to surpass the limitations on human space travel and conquer the vast distances involved in an interstellar voyage.',
+    },
+    {
+      id: { provider: 'moviebox', value: 'demo-oppenheimer' },
+      title: 'Oppenheimer',
+      year: '2023',
+      media_type: 'movie',
+      poster_url: 'https://image.tmdb.org/t/p/w500/8Gxv8gSFCU0XGDykEGv7zR1n2ua.jpg',
+      backdrop_url: 'https://image.tmdb.org/t/p/w1280/fm6KqXpk3M2HVveHwCrBSSBaO0V.jpg',
+      imdb_rating: '8.3',
+      duration: '181m',
+      genres: ['Drama', 'History', 'Thriller'],
+      director: 'Christopher Nolan',
+      cast: ['Cillian Murphy', 'Emily Blunt', 'Matt Damon', 'Robert Downey Jr.'],
+      tagline: 'The world forever changes.',
+      description: 'The story of J. Robert Oppenheimer’s role in the development of the atomic bomb during World War II.',
+    },
+    {
+      id: { provider: 'moviebox', value: 'demo-spirited-away' },
+      title: 'Spirited Away',
+      year: '2001',
+      media_type: 'movie',
+      poster_url: 'https://image.tmdb.org/t/p/w500/39wmItIWsg5sZMyRUHLkWBcuVCM.jpg',
+      backdrop_url: 'https://image.tmdb.org/t/p/w1280/bSXfU4dwZyBA1vMmXvejdRXBvuF.jpg',
+      imdb_rating: '8.6',
+      duration: '125m',
+      genres: ['Animation', 'Adventure', 'Fantasy'],
+      director: 'Hayao Miyazaki',
+      cast: ['Rumi Hiiragi', 'Miyu Irino', 'Mari Natsuki'],
+      tagline: 'Nothing that happens is ever forgotten, even if you can’t remember it.',
+      description: 'A young girl, Chihiro, becomes trapped in a strange new world of spirits. When her parents undergo a mysterious transformation, she must call upon the courage she never knew she had to free her family.',
+    },
+    {
+      id: { provider: 'moviebox', value: 'demo-the-batman' },
+      title: 'The Batman',
+      year: '2022',
+      media_type: 'movie',
+      poster_url: 'https://image.tmdb.org/t/p/w500/74xTEgt7R36Fpooo50r9T25onhq.jpg',
+      backdrop_url: 'https://image.tmdb.org/t/p/w1280/b0PlSFdDwbyK0cf5RxwDpaOJQvQ.jpg',
+      imdb_rating: '7.8',
+      duration: '176m',
+      genres: ['Crime', 'Mystery', 'Thriller', 'Action'],
+      director: 'Matt Reeves',
+      cast: ['Robert Pattinson', 'Zoë Kravitz', 'Paul Dano', 'Jeffrey Wright'],
+      tagline: 'Unmask the truth.',
+      description: 'In his second year of fighting crime, Batman uncovers corruption in Gotham City that connects to his own family while facing a serial killer known as the Riddler.',
+    },
+    {
+      id: { provider: 'moviebox', value: 'demo-blade-runner-2049' },
+      title: 'Blade Runner 2049',
+      year: '2017',
+      media_type: 'movie',
+      poster_url: 'https://image.tmdb.org/t/p/w500/gajva2L0rPYkEWjzgFlBXCAVBE5.jpg',
+      backdrop_url: 'https://image.tmdb.org/t/p/w1280/ilRyazdMJwN05exqhwK4tMKBYZs.jpg',
+      imdb_rating: '8.0',
+      duration: '164m',
+      genres: ['Science Fiction', 'Drama', 'Mystery'],
+      director: 'Denis Villeneuve',
+      cast: ['Ryan Gosling', 'Harrison Ford', 'Ana de Armas'],
+      tagline: 'The key to the future is finally unearthed.',
+      description: 'Thirty years after the events of the first film, a new blade runner, LAPD Officer K, unearths a long-buried secret that has the potential to plunge what’s left of society into chaos.',
+    },
+    {
+      id: { provider: 'moviebox', value: 'demo-severance' },
+      title: 'Severance',
+      year: '2022',
+      media_type: 'series',
+      season_count: 2,
+      poster_url: 'https://image.tmdb.org/t/p/w500/lFf6LLrQjYldcZItzOkGmMMigP7.jpg',
+      backdrop_url: 'https://image.tmdb.org/t/p/w1280/ixgFmf1X59PUZam2qbAfskx2gQr.jpg',
+      imdb_rating: '8.7',
+      duration: '50m',
+      genres: ['Drama', 'Mystery', 'Science Fiction', 'Thriller'],
+      director: 'Ben Stiller',
+      cast: ['Adam Scott', 'Britt Lower', 'Zach Cherry', 'John Turturro'],
+      tagline: 'Please try to enjoy each episode equally.',
+      description: 'Mark leads a team of office workers whose memories have been surgically divided between their work and personal lives. When a mysterious colleague appears outside of work, it begins a journey to discover the truth about their jobs.',
+    },
+    {
+      id: { provider: 'moviebox', value: 'demo-shogun' },
+      title: 'Shōgun',
+      year: '2024',
+      media_type: 'series',
+      season_count: 1,
+      poster_url: 'https://image.tmdb.org/t/p/w500/7O4iVfOMQmdCSxhOg1WnzG1AgYT.jpg',
+      backdrop_url: 'https://image.tmdb.org/t/p/w1280/5zmiBoMzeeVdQ62no55JOJMY498.jpg',
+      imdb_rating: '8.6',
+      duration: '60m',
+      genres: ['Drama', 'Action', 'Adventure', 'History'],
+      director: 'Rachel Kondo',
+      cast: ['Hiroyuki Sanada', 'Cosmo Jarvis', 'Anna Sawai'],
+      tagline: 'An epic saga of war, passion, and power in feudal Japan.',
+      description: 'In Japan in the year 1600, at the dawn of a century-defining civil war, Lord Yoshii Toranaga is fighting for his life as his enemies on the Council of Regents unite against him.',
+    },
+    {
+      id: { provider: 'moviebox', value: 'demo-arcane' },
+      title: 'Arcane',
+      year: '2021',
+      media_type: 'series',
+      season_count: 2,
+      poster_url: 'https://image.tmdb.org/t/p/w500/fqldf2t8ztc9aiwn3k6mlX3tvRT.jpg',
+      backdrop_url: 'https://image.tmdb.org/t/p/w1280/rkB4LyZHo1NHXFEDHl9vSD9r1lI.jpg',
+      imdb_rating: '9.0',
+      duration: '42m',
+      genres: ['Animation', 'Action', 'Adventure', 'Science Fiction'],
+      director: 'Christian Linke',
+      cast: ['Hailee Steinfeld', 'Ella Purnell', 'Kevin Alejandro'],
+      tagline: 'Every legend has a beginning.',
+      description: 'Amid the stark discord of twin cities Piltover and Zaun, two sisters fight on rival sides of a war between magic technologies and clashing convictions.',
+    },
+    {
+      id: { provider: 'moviebox', value: 'demo-the-bear' },
+      title: 'The Bear',
+      year: '2022',
+      media_type: 'series',
+      season_count: 3,
+      poster_url: 'https://image.tmdb.org/t/p/w500/sHFlbKS3WLqMnp9t2ghADIJFnuQ.jpg',
+      backdrop_url: 'https://image.tmdb.org/t/p/w1280/zPyj6L5xH3mD1b4jBfB4kQ2f5x2.jpg',
+      imdb_rating: '8.5',
+      duration: '34m',
+      genres: ['Drama', 'Comedy'],
+      director: 'Christopher Storer',
+      cast: ['Jeremy Allen White', 'Ayo Edebiri', 'Ebon Moss-Bachrach'],
+      tagline: 'Every second counts.',
+      description: 'A young chef from the fine dining world comes home to Chicago to run his family sandwich shop after a heartbreaking loss.',
+    },
+  ];
 
-const demoTitles = [
-  {
-    id: { provider: 'moviebox', value: 'demo-interstellar' },
-    title: 'Interstellar',
-    media_type: 'movie',
-    year: '2014',
-    poster_url: 'https://image.tmdb.org/t/p/w500/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg',
-    season_count: null,
-    description:
-      'A team of explorers travels beyond this galaxy to discover whether mankind has a future among the stars.',
-    rating: '8.7',
-    director: 'Christopher Nolan',
-    stars: 'Matthew McConaughey, Anne Hathaway, Jessica Chastain',
-    duration: '169m',
-    genres: ['Adventure', 'Drama', 'Science Fiction'],
-    trending: 980,
-    popularity: 940,
-    recent_rating: 8.4,
-  },
-  {
-    id: { provider: 'moviebox', value: 'demo-dune-two' },
-    title: 'Dune: Part Two',
-    media_type: 'movie',
-    year: '2024',
-    poster_url: 'https://image.tmdb.org/t/p/w500/1pdfLvkbY9ohJlCjQH2CZjjYVvJ.jpg',
-    season_count: null,
-    description:
-      'Paul Atreides unites with Chani and the Fremen while seeking revenge against the conspirators who destroyed his family.',
-    rating: '8.5',
-    director: 'Denis Villeneuve',
-    stars: 'Timothée Chalamet, Zendaya, Rebecca Ferguson',
-    duration: '166m',
-    genres: ['Adventure', 'Science Fiction'],
-    trending: 970,
-    popularity: 900,
-    recent_rating: 8.6,
-  },
-  {
-    id: { provider: 'moviebox', value: 'demo-batman' },
-    title: 'The Batman',
-    media_type: 'movie',
-    year: '2022',
-    poster_url: 'https://image.tmdb.org/t/p/w500/74xTEgt7R36Fpooo50r9T25onhq.jpg',
-    season_count: null,
-    description:
-      'Batman ventures into Gotham City’s underworld when a sadistic killer leaves behind a trail of cryptic clues.',
-    rating: '7.8',
-    director: 'Matt Reeves',
-    stars: 'Robert Pattinson, Zoë Kravitz, Paul Dano',
-    duration: '176m',
-    genres: ['Crime', 'Mystery', 'Drama'],
-    trending: 830,
-    popularity: 880,
-    recent_rating: 7.6,
-  },
-  {
-    id: { provider: 'moviebox', value: 'demo-poor-things' },
-    title: 'Poor Things',
-    media_type: 'movie',
-    year: '2023',
-    poster_url: 'https://image.tmdb.org/t/p/w500/kCGlIMHnOm8JPXq3rXM6c5wMxcT.jpg',
-    season_count: null,
-    description:
-      'The incredible tale and fantastical evolution of Bella Baxter, a young woman brought back to life by an unorthodox scientist.',
-    rating: '7.8',
-    director: 'Yorgos Lanthimos',
-    stars: 'Emma Stone, Mark Ruffalo, Willem Dafoe',
-    duration: '141m',
-    genres: ['Science Fiction', 'Romance', 'Comedy'],
-    trending: 760,
-    popularity: 720,
-    recent_rating: 7.9,
-  },
-  {
-    id: { provider: 'moviebox', value: 'demo-past-lives' },
-    title: 'Past Lives',
-    media_type: 'movie',
-    year: '2023',
-    poster_url: 'https://image.tmdb.org/t/p/w500/k3waqVXSnvCZWfJYNtdamTgTtTA.jpg',
-    season_count: null,
-    description:
-      'Two deeply connected childhood friends are wrested apart after one family emigrates from South Korea.',
-    rating: '7.8',
-    director: 'Celine Song',
-    stars: 'Greta Lee, Teo Yoo, John Magaro',
-    duration: '105m',
-    genres: ['Drama', 'Romance'],
-    trending: 690,
-    popularity: 610,
-    recent_rating: 8.1,
-  },
-  {
-    id: { provider: 'moviebox', value: 'demo-wild-robot' },
-    title: 'The Wild Robot',
-    media_type: 'movie',
-    year: '2024',
-    poster_url: 'https://image.tmdb.org/t/p/w500/wTnV3PCVW5O92JMrFvvrRcV39RU.jpg',
-    season_count: null,
-    description:
-      'A robot finds herself on an uninhabited island and builds an unexpected bond with the animals around her.',
-    rating: '8.2',
-    director: 'Chris Sanders',
-    stars: 'Lupita Nyong’o, Pedro Pascal, Kit Connor',
-    duration: '102m',
-    genres: ['Animation', 'Family', 'Adventure'],
-    trending: 880,
-    popularity: 800,
-    recent_rating: 8.3,
-  },
-  {
-    id: { provider: 'moviebox', value: 'demo-oppenheimer' },
-    title: 'Oppenheimer',
-    media_type: 'movie',
-    year: '2023',
-    poster_url: 'https://image.tmdb.org/t/p/w500/8Gxv8gSFCU0XGDykEGv7zR1n2ua.jpg',
-    season_count: null,
-    description: 'The story of the American physicist who led the development of the atomic bomb.',
-    rating: '8.3',
-    director: 'Christopher Nolan',
-    stars: 'Cillian Murphy, Emily Blunt, Robert Downey Jr.',
-    duration: '180m',
-    genres: ['Drama', 'History'],
-    trending: 905,
-    popularity: 950,
-    recent_rating: 8.0,
-  },
-  {
-    id: { provider: 'moviebox', value: 'demo-arcane' },
-    title: 'Arcane',
-    media_type: 'series',
-    year: '2021',
-    poster_url: 'https://image.tmdb.org/t/p/w500/fqldf2t8ztc9aiwn3k6mlX3tvRT.jpg',
-    season_count: 2,
-    description:
-      'Amid the stark discord of twin cities Piltover and Zaun, two sisters fight on rival sides of a war between magic technologies and clashing convictions.',
-    rating: '9.0',
-    director: 'Pascal Charrue',
-    stars: 'Hailee Steinfeld, Ella Purnell, Kevin Alejandro',
-    duration: '40m',
-    genres: ['Animation', 'Action', 'Adventure'],
-    trending: 940,
-    popularity: 910,
-    recent_rating: 8.9,
-    seasons: [
-      {
-        number: 1,
-        episodes: [
-          { season: 1, number: 1, title: 'Welcome to the Playground', overview: 'Vi and Powder sneak into Piltover.' },
-          { season: 1, number: 2, title: 'Some Mysteries Are Better Left Unsolved', overview: null },
-          { season: 1, number: 3, title: 'The Base Violence Necessary for Change', overview: null },
-        ],
-      },
-      { number: 2, episodes: [{ season: 2, number: 1, title: 'Heavy Is the Crown', overview: null }] },
-    ],
-  },
-  {
-    id: { provider: 'moviebox', value: 'demo-shogun' },
-    title: 'Shōgun',
-    media_type: 'series',
-    year: '2024',
-    poster_url: 'https://image.tmdb.org/t/p/w500/7O4iVfOMQmdCSxhOg1WnzG1AgYT.jpg',
-    season_count: 1,
-    description:
-      'In Japan in the year 1600, a mysterious European ship pilot becomes a pawn in a political struggle.',
-    rating: '8.6',
-    director: 'Rachel Kondo',
-    stars: 'Hiroyuki Sanada, Cosmo Jarvis, Anna Sawai',
-    duration: '55m',
-    genres: ['Drama', 'History', 'War'],
-    trending: 920,
-    popularity: 870,
-    recent_rating: 8.7,
-    seasons: [
-      {
-        number: 1,
-        episodes: [
-          { season: 1, number: 1, title: 'Anjin', overview: 'A ship runs aground in Japan.' },
-          { season: 1, number: 2, title: 'Servants of Two Masters', overview: null },
-        ],
-      },
-    ],
-  },
-];
+  const knownProviders = new Set([
+    'moviebox',
+    'fourkhdhub',
+    'dramachi',
+    'bdix_circleftp',
+    'bdix_dhakaflix',
+    'addons',
+  ]);
+  const library = { version: 1, watchlist: [], progress: [], ratings: [] };
 
-const providers = [
-  { id: 'moviebox', name: 'MovieBox' },
-  { id: 'fourkhdhub', name: '4KHDHub' },
-  { id: 'dramachi', name: 'Dramachi' },
-  { id: 'bdix_circleftp', name: 'CircleFTP (BDIX)' },
-  { id: 'bdix_dhakaflix', name: 'DhakaFlix (BDIX)' },
-  { id: 'addons', name: 'Community Add-ons' },
-];
-
-const sampleVideo = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4';
-
-const COLLECTION_ROWS = [
-  { key: 'trending', label: 'Trending Now', hint: 'What everyone is watching this week', metric: 'trending' },
-  { key: 'top_rated', label: 'Top Rated', hint: 'Highest IMDb scores of all time', metric: 'rating' },
-  { key: 'fresh', label: 'Fresh & Highly Rated', hint: 'Recent releases critics liked', metric: 'recent_rating' },
-  { key: 'most_watched', label: 'Most Watched', hint: 'Community favourites', metric: 'popularity' },
-];
-
-function json(res, status, payload) {
-  res.statusCode = status;
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-store');
-  res.end(JSON.stringify(payload));
-}
-
-function catalogShape(item) {
-  return {
-    id: item.id,
-    title: item.title,
-    media_type: item.media_type,
-    year: item.year,
-    poster_url: item.poster_url,
-    season_count: item.season_count ?? null,
+  const send = (res, status, payload) => {
+    res.statusCode = status;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify(payload));
   };
-}
 
-function metricsShape(item) {
-  return {
-    trending: item.trending ?? null,
-    rating: Number(item.rating) || null,
-    recent_rating: item.recent_rating ?? null,
-    popularity: item.popularity ?? null,
-  };
-}
+  const readJson = (req) =>
+    new Promise((resolve) => {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        try { resolve(body ? JSON.parse(body) : {}); } catch { resolve({}); }
+      });
+    });
 
-function makeMockApiPlugin(enabled) {
   return {
     name: 'ifallhub-demo-api',
     configureServer(server) {
-      if (!enabled) return;
-
-      // In-memory library so the demo behaves like the Rust engine, including
-      // the SSE stream that keeps browsers in sync.
-      const libraryState = { watchlist: [], progress: [], ratings: [], version: 0 };
-      const subscribers = new Set();
-
-      const broadcast = () => {
-        const payload = JSON.stringify({ ...libraryState, synced_at: Math.floor(Date.now() / 1000) });
-        for (const res of subscribers) {
-          res.write(`event: library\ndata: ${payload}\n\n`);
-        }
-      };
-      const touch = (scope) => {
-        libraryState.version += 1;
-        server.config.logger.info(`demo library: ${scope} (v${libraryState.version})`);
-        broadcast();
-      };
-      const keyOf = (entry) => `${String(entry.provider).toLowerCase()}::${entry.id}`;
-
       server.middlewares.use(async (req, res, next) => {
-        if (!req.url?.startsWith('/api/')) return next();
-
+        if (!req.url || !req.url.startsWith('/api/')) return next();
         const url = new URL(req.url, 'http://localhost');
-        const query = url.searchParams;
         const path = url.pathname;
-        const itemId = query.get('id') || '';
-        const item = demoTitles.find((entry) => entry.id.value === itemId) || demoTitles[0];
-        const isSeries = item.media_type === 'series';
-
-        const readBody = () =>
-          new Promise((resolve) => {
-            let raw = '';
-            req.on('data', (chunk) => {
-              raw += chunk;
-            });
-            req.on('end', () => {
-              try {
-                resolve(raw ? JSON.parse(raw) : {});
-              } catch {
-                resolve({});
-              }
-            });
-          });
-
         if (path === '/api/health') {
-          return json(res, 200, {
-            status: 'ok',
-            mode: 'demo',
-            engine: 'Ifallhub web preview',
-            version: '0.0.0-demo',
-          });
+          return send(res, 200, { status: 'ok', ok: true, mode: 'demo', service: 'ifallhub-demo-api', version: 'demo', auth_required: false });
         }
-
-        if (path === '/api/providers') return json(res, 200, providers);
-
-        if (path === '/api/collections') {
-          const limit = Math.min(Number(query.get('limit')) || 24, 48);
-          const metrics = {};
-          const rows = COLLECTION_ROWS.map((row) => {
-            const items = [...demoTitles]
-              .sort((a, b) => (b[row.metric] || 0) - (a[row.metric] || 0))
-              .slice(0, limit);
-            for (const entry of items) metrics[entry.id.value] = metricsShape(entry);
-            return { key: row.key, label: row.label, hint: row.hint, items: items.map(catalogShape) };
-          });
-          return json(res, 200, { rows, metrics, source: 'moviebox' });
+        if (path === '/api/providers') {
+          return send(res, 200, [
+            { id: 'moviebox', name: 'Siddharth', label: 'Siddharth', supports_discover: true },
+            { id: 'fourkhdhub', name: 'Ritu', label: 'Ritu', supports_discover: false },
+            { id: 'dramachi', name: 'Sakshi', label: 'Sakshi', supports_discover: false },
+            { id: 'bdix_circleftp', name: 'Shreya', label: 'Shreya', supports_discover: false },
+            { id: 'bdix_dhakaflix', name: 'Everyone', label: 'Everyone', supports_discover: false },
+            { id: 'addons', name: 'Ifallhub', label: 'Ifallhub', supports_discover: false },
+          ]);
         }
-
+        if (path.startsWith('/api/media/')) {
+          return send(res, 404, { error: 'Unknown or expired media session' });
+        }
         if (path === '/api/discover') {
-          const metrics = {};
-          for (const entry of demoTitles) metrics[entry.id.value] = metricsShape(entry);
-          return json(res, 200, { items: demoTitles.map(catalogShape), metrics });
+          const metrics = Object.fromEntries(
+            sampleCatalog.map((item, idx) => [
+              item.id.value,
+              {
+                trending: 100 - idx * 7,
+                rating: Number(item.imdb_rating) * 10,
+                recent_rating: Number(item.year) >= 2022 ? Number(item.imdb_rating) * 10 : 50,
+                popularity: 95 - idx * 5,
+              },
+            ]),
+          );
+          return send(res, 200, { items: sampleCatalog, metrics });
         }
-
+        if (path === '/api/collections') {
+          return send(res, 200, {
+            source: 'moviebox',
+            metrics: {},
+            rows: [
+              { key: 'trending', label: 'Trending Now', hint: 'What everyone is watching this week', items: sampleCatalog },
+              {
+                key: 'top_rated',
+                label: 'Top Rated',
+                hint: 'Highest IMDb scores of all time',
+                items: [...sampleCatalog].sort((a, b) => Number(b.imdb_rating) - Number(a.imdb_rating)),
+              },
+              {
+                key: 'fresh',
+                label: 'Fresh & Highly Rated',
+                hint: 'Recent releases critics liked',
+                items: sampleCatalog.filter((it) => Number(it.year) >= 2022),
+              },
+              {
+                key: 'most_watched',
+                label: 'Most Watched',
+                hint: 'Community favourites',
+                items: [...sampleCatalog].reverse(),
+              },
+            ],
+          });
+        }
         if (path === '/api/search') {
-          const term = (query.get('q') || '').trim().toLowerCase();
-          const matches = demoTitles.filter((entry) => {
-            const text = `${entry.title} ${entry.year} ${entry.genres.join(' ')} ${entry.director} ${entry.stars}`.toLowerCase();
-            return !term || text.includes(term);
-          });
-          return json(res, 200, matches.map(catalogShape));
+          const q = (url.searchParams.get('q') || '').toLowerCase();
+          const provider = url.searchParams.get('provider') || 'moviebox';
+          const matches = sampleCatalog
+            .filter((it) =>
+              it.title.toLowerCase().includes(q) ||
+              (it.genres || []).some((g) => g.toLowerCase().includes(q)) ||
+              String(it.director || '').toLowerCase().includes(q) ||
+              String(it.year || '').includes(q),
+            )
+            .map((it) => ({ ...it, id: { provider, value: it.id.value } }));
+          return send(res, 200, matches.length ? matches : sampleCatalog.slice(0, 4).map((it) => ({ ...it, id: { provider, value: it.id.value } })));
         }
-
         if (path === '/api/suggest') {
-          const term = (query.get('q') || '').trim().toLowerCase();
-          const suggestions = term
-            ? demoTitles.map((entry) => entry.title).filter((title) => title.toLowerCase().includes(term))
-            : [];
-          return json(res, 200, { suggestions: suggestions.slice(0, 8) });
+          const q = (url.searchParams.get('q') || '').toLowerCase();
+          return send(res, 200, {
+            suggestions: sampleCatalog.map((it) => it.title).filter((t) => t.toLowerCase().includes(q)).slice(0, 6),
+          });
         }
-
         if (path === '/api/details') {
-          return json(res, 200, {
-            id: item.id,
-            title: item.title,
-            media_type: item.media_type,
-            year: item.year,
-            description: item.description,
-            tagline: null,
-            imdb_rating: item.rating,
-            director: item.director,
-            stars: item.stars,
-            prints: '1080p · WEB-DL',
-            audios: 'English',
-            poster_url: item.poster_url,
-            duration: item.duration,
-            genres: item.genres,
-            seasons: item.seasons || [],
-            dubs: [],
+          const id = url.searchParams.get('id') || sampleCatalog[0].id.value;
+          const provider = url.searchParams.get('provider') || 'moviebox';
+          const found = sampleCatalog.find((it) => it.id.value === id) || sampleCatalog[0];
+          const seasonTotal = found.season_count || 2;
+          const seasons = found.media_type === 'series'
+            ? Array.from({ length: seasonTotal }, (_, sIdx) => ({
+                season_number: sIdx + 1,
+                episode_count: 8,
+                episodes: Array.from({ length: 8 }, (__, eIdx) => ({
+                  episode_number: eIdx + 1,
+                  title: `Chapter ${eIdx + 1}`,
+                  duration: found.duration || '48m',
+                  overview: `Season ${sIdx + 1}, Episode ${eIdx + 1} of ${found.title}.`,
+                })),
+              }))
+            : [];
+          return send(res, 200, {
+            ...found,
+            id: { provider, value: found.id.value },
+            prints: ['2160p', '1080p', '720p'],
+            audios: ['English', 'Hindi'],
+            seasons,
           });
         }
-
         if (path === '/api/related') {
-          if (!itemId) return json(res, 400, { error: 'A valid title id is required' });
-          const shared = item.genres || [];
-          const matches = demoTitles.filter((entry) => {
-            if (entry.id.value === item.id.value) return false;
-            const overlap = (entry.genres || []).some((genre) => shared.includes(genre));
-            return overlap || entry.director === item.director;
-          });
-          const reasons = {};
-          for (const entry of matches) {
-            const genre = (entry.genres || []).find((candidate) => shared.includes(candidate));
-            reasons[entry.id.value] = [
-              genre ? `Because you like ${genre}` : `More from ${item.director}`,
-            ];
-          }
-          return json(res, 200, {
-            items: matches.map(catalogShape),
-            reasons,
-            seeds: shared.map((genre) => ({ term: genre, reason: `Because you like ${genre}` })),
-            source_id: item.id.value,
+          const id = (url.searchParams.get('id') || '').trim();
+          if (!id) return send(res, 400, { error: 'Missing required id parameter' });
+          const others = sampleCatalog.filter((it) => it.id.value !== id);
+          return send(res, 200, {
+            items: others,
+            reasons: Object.fromEntries(others.map((it) => [it.id.value, [`Because you like ${(it.genres || ['Cinema'])[0]}`]])),
+            seeds: [{ term: 'Sci-Fi', reason: 'Because you like Science Fiction' }],
+            source_id: id,
           });
         }
-
         if (path === '/api/meta') {
-          const ids = (query.get('id') || '').split(',').filter(Boolean);
+          const ids = (url.searchParams.get('id') || '').split(',').map((s) => s.trim()).filter(Boolean);
           const meta = {};
           for (const id of ids) {
-            const entry = demoTitles.find((candidate) => candidate.id.value === id);
-            if (!entry) continue;
-            meta[id] = { rating: Number(entry.rating) || null, genres: entry.genres, duration: entry.duration };
+            const it = sampleCatalog.find((entry) => entry.id.value === id);
+            if (it) {
+              meta[id] = {
+                imdb_rating: it.imdb_rating,
+                genres: it.genres,
+                duration: it.duration,
+                year: it.year,
+                poster_url: it.poster_url,
+                media_type: it.media_type,
+              };
+            }
           }
-          return json(res, 200, { meta });
+          return send(res, 200, { meta });
         }
-
-        // Public subtitle providers (OpenSubtitles v3, Podnapisi, Wyzie) answer
-        // with the same shape as the Rust engine so the picker can be tried
-        // without a backend.
-        if (path === '/api/subtitles') {
-          const season = Number(query.get('season') || 0);
-          const episode = Number(query.get('episode') || 0);
-          const scope = season && episode ? ` S${season}E${episode}` : '';
-          return json(res, 200, {
-            subtitle_set_id: 'demo0000subtitleset0000provider',
-            sources: ['opensubtitles', 'podnapisi', 'wyzie'],
-            subtitles: [
-              {
-                index: 0,
-                name: `English · OpenSubtitles · 1080p WEB-DL${scope}`,
-                language: 'en',
-                source: 'opensubtitles',
-                format: 'srt',
-                downloads: 4210,
-                hearing_impaired: false,
-              },
-              {
-                index: 1,
-                name: `English [SDH] · Podnapisi · WEB${scope}`,
-                language: 'en',
-                source: 'podnapisi',
-                format: 'srt',
-                downloads: 820,
-                hearing_impaired: true,
-              },
-              {
-                index: 2,
-                name: `Hindi · Wyzie · 1080p${scope}`,
-                language: 'hi',
-                source: 'wyzie',
-                format: 'srt',
-                downloads: 260,
-                hearing_impaired: false,
-              },
-            ],
-          });
-        }
-
-        if (path === '/api/subtitle-file') {
-          const index = Number(query.get('index') || 0);
-          const hindi = '1\n00:00:01,000 --> 00:00:04,000\nडेमो सबटाइटल (public API se)\n\n2\n00:00:05,000 --> 00:00:08,000\nRust engine ke saath asli captions aate hain\n';
-          const english = '1\n00:00:01,000 --> 00:00:04,000\nDemo subtitles from a public provider API\n\n2\n00:00:05,000 --> 00:00:08,000\nRun the Rust engine for real captions\n';
-          return json(res, 200, {
-            text: index === 2 ? hindi : english,
-            name: index === 2 ? 'Hindi · Wyzie · 1080p' : 'English · OpenSubtitles · 1080p WEB-DL',
-            source: index === 2 ? 'wyzie' : 'opensubtitles',
-            language: index === 2 ? 'hi' : 'en',
-          });
-        }
-
         if (path === '/api/streams') {
-          return json(res, 200, {
-            stream_set_id: `demo-stream-${item.id.value}`,
-            blocked_addons: [],
+          const id = url.searchParams.get('id') || sampleCatalog[0].id.value;
+          const provider = url.searchParams.get('provider') || 'moviebox';
+          const found = sampleCatalog.find((it) => it.id.value === id) || sampleCatalog[0];
+          const epTag = Number(url.searchParams.get('season')) > 0
+            ? `.S0${url.searchParams.get('season')}E0${url.searchParams.get('episode') || 1}`
+            : `.${found.year}`;
+          const slug = found.title.replace(/[^a-zA-Z0-9]+/g, '.');
+          return send(res, 200, {
+            stream_set_id: 'demo-set',
             releases: [
               {
-                provider: query.get('provider') || 'moviebox',
-                filename: `${item.title.replaceAll(' ', '.')}.${item.year}.1080p.Demo.mp4`,
+                provider,
+                filename: `${slug}${epTag}.1080p.WEB-DL.AAC2.0.H.264.mp4`,
                 quality: '1080p',
-                codec: 'H.264',
-                language: 'English',
-                size_bytes: 1640000000,
-                season: isSeries ? Number(query.get('season')) || 1 : null,
-                episode: isSeries ? Number(query.get('episode')) || 1 : null,
-                mirrors: [{ label: 'Sample video', resolver_url: '', headers: [], direct_file: true }],
-                resource_id: null,
+                codec: 'h264',
+                size_bytes: 1_850_000_000,
+                mirrors: [
+                  { label: 'Primary CDN (1080p)', direct_file: true },
+                  { label: 'Backup CDN (1080p)', direct_file: true },
+                ],
               },
               {
-                provider: query.get('provider') || 'moviebox',
-                filename: `${item.title.replaceAll(' ', '.')}.${item.year}.720p.Demo.mp4`,
+                provider,
+                filename: `${slug}${epTag}.2160p.UHD.DV.HDR10.DDP5.1.H.265.mkv`,
+                quality: '2160p',
+                codec: 'h265',
+                size_bytes: 5_400_000_000,
+                mirrors: [{ label: '4K Remux Mirror', direct_file: true }],
+              },
+              {
+                provider,
+                filename: `${slug}${epTag}.720p.WEBRip.AAC.x264.mp4`,
                 quality: '720p',
-                codec: 'H.264',
-                language: 'English',
-                size_bytes: 940000000,
-                season: null,
-                episode: null,
-                mirrors: [{ label: 'Sample video', resolver_url: '', headers: [], direct_file: true }],
-                resource_id: null,
+                codec: 'h264',
+                size_bytes: 920_000_000,
+                mirrors: [{ label: 'Fast 720p Mirror', direct_file: true }],
               },
             ],
           });
         }
-
-        if (path === '/api/play' && req.method === 'POST') {
-          await readBody();
-          return json(res, 200, {
-            playback_url: sampleVideo,
+        if (path === '/api/play') {
+          return send(res, 200, {
+            url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
+            playback_url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
             stream_type: 'file',
-            source_label: 'Demo sample',
-            quality: '1080p',
-            mode: 'demo',
+            content_type: 'video/mp4',
+            direct_file: true,
           });
         }
-
-        // --- Local player handoff ("Open in VLC") ---------------------------
-        // The demo runs without the Rust engine, so it has no local player to
-        // launch: the button copies the link instead. Start
-        // `cargo run -- --web-api` to open VLC for real.
-        if (path === '/api/player' && req.method !== 'POST') {
-          return json(res, 200, {
+        if (path === '/api/player') {
+          return send(res, 200, {
             available: false,
             players: [],
-            default: null,
-            reason: 'Demo mode has no local player. Run the Rust engine to open VLC.',
+            reason: 'Running in browser demo mode — use VLC app link, .m3u playlist, or Copy link below.',
           });
         }
-
-        if (path === '/api/player/open' && req.method === 'POST') {
-          await readBody();
-          return json(res, 409, {
-            error: 'Demo mode has no local player. Run the Rust engine to open VLC.',
-            available: false,
-            players: [],
+        if (path === '/api/subtitles') {
+          return send(res, 200, {
+            subtitle_set_id: 'demo-subs',
+            subtitles: [
+              { index: 0, name: 'English · Official WEB-DL', language: 'en', format: 'vtt', provider: 'moviebox' },
+              { index: 1, name: 'English [SDH] · OpenSubtitles', language: 'en', format: 'srt', provider: 'opensubtitles' },
+              { index: 2, name: 'Hindi · Wyzie', language: 'hi', format: 'vtt', provider: 'wyzie' },
+            ],
           });
         }
-
-        // --- Library -------------------------------------------------------
-        if (path === '/api/library' && req.method !== 'POST') {
-          return json(res, 200, { ...libraryState, synced_at: Math.floor(Date.now() / 1000) });
+        if (path === '/api/subtitle-file') {
+          return send(res, 200, {
+            name: 'English · Official WEB-DL',
+            format: 'vtt',
+            text: 'WEBVTT\n\n00:00:00.500 --> 00:00:05.000\nSubtitles connected via Ifallhub Subtitle Engine.\n\n00:00:05.500 --> 00:00:12.000\nEnjoy watching in browser or external VLC / mpv.\n',
+          });
         }
-
-        if (path.startsWith('/api/library/') && req.method === 'POST') {
-          const body = await readBody();
-          const known = providers.some((entry) => entry.id === String(body.provider || '').toLowerCase());
-          if (path !== '/api/library/clear' && !known) {
-            return json(res, 400, { error: 'Unknown content provider' });
-          }
-          if (path !== '/api/library/clear' && !String(body.id || '').trim()) {
-            return json(res, 400, { error: 'A valid title id is required' });
-          }
-          req.demoLibraryBody = body;
+        if (path === '/api/library' && req.method === 'GET') {
+          return send(res, 200, { ...library, stats: {} });
         }
-
-        if (path === '/api/library/watchlist' && req.method === 'POST') {
-          const body = req.demoLibraryBody || (await readBody());
-          const key = keyOf(body);
-          const stamp = Math.floor(Date.now() / 1000);
-          if (body.remove) {
-            libraryState.watchlist = libraryState.watchlist.filter((entry) => keyOf(entry) !== key);
-          } else {
-            const existing = libraryState.watchlist.find((entry) => keyOf(entry) === key);
-            const entry = { added_at: stamp, ...body, updated_at: stamp, added_at: existing?.added_at || stamp };
-            if (existing) Object.assign(existing, entry);
-            else libraryState.watchlist.unshift(entry);
-          }
-          touch('watchlist');
-          return json(res, 200, { ...libraryState, listed: !body.remove, synced_at: stamp });
-        }
-
-        if (path === '/api/library/progress' && req.method === 'POST') {
-          const body = req.demoLibraryBody || (await readBody());
-          const key = keyOf(body);
-          const stamp = Math.floor(Date.now() / 1000);
-          if (body.remove) {
-            libraryState.progress = libraryState.progress.filter((entry) => keyOf(entry) !== key);
-          } else {
-            const existing = libraryState.progress.find((entry) => keyOf(entry) === key);
-            const entry = { ...body, updated_at: stamp };
-            if (existing) Object.assign(existing, entry);
-            else libraryState.progress.unshift(entry);
-          }
-          touch('progress');
-          return json(res, 200, { ...libraryState, synced_at: stamp });
-        }
-
-        if (path === '/api/library/rating' && req.method === 'POST') {
-          const body = req.demoLibraryBody || (await readBody());
-          const key = keyOf(body);
-          const stamp = Math.floor(Date.now() / 1000);
-          const value = Math.max(0, Math.min(10, Number(body.rating) || 0));
-          libraryState.ratings = libraryState.ratings.filter((entry) => keyOf(entry) !== key);
-          if (value > 0) libraryState.ratings.unshift({ ...body, rating: value, updated_at: stamp });
-          touch('ratings');
-          return json(res, 200, { ...libraryState, rated: value > 0, synced_at: stamp });
-        }
-
-        if (path === '/api/library/clear' && req.method === 'POST') {
-          const body = req.demoLibraryBody || (await readBody());
-          const scope = String(body.scope || 'all');
-          if (scope === 'all' || scope === 'watchlist') libraryState.watchlist = [];
-          if (scope === 'all' || scope === 'progress') libraryState.progress = [];
-          if (scope === 'all' || scope === 'ratings') libraryState.ratings = [];
-          touch('clear');
-          return json(res, 200, { ...libraryState, cleared: scope, synced_at: Math.floor(Date.now() / 1000) });
-        }
-
         if (path === '/api/library/events') {
           res.statusCode = 200;
           res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-          res.setHeader('Cache-Control', 'no-store, no-transform');
-          res.setHeader('Connection', 'keep-alive');
-          res.flushHeaders?.();
-          res.write(`event: library\ndata: ${JSON.stringify({ ...libraryState, synced_at: Math.floor(Date.now() / 1000) })}\n\n`);
-          subscribers.add(res);
-          const keepAlive = setInterval(() => res.write('event: ping\ndata: {}\n\n'), 20000);
-          req.on('close', () => {
-            clearInterval(keepAlive);
-            subscribers.delete(res);
-          });
-          return undefined;
+          res.setHeader('Cache-Control', 'no-store');
+          res.write(`event: library\ndata: ${JSON.stringify(library)}\n\n`);
+          return;
         }
-
-        return json(res, 404, { error: 'Unknown demo API route' });
+        if (path === '/api/library/watchlist' && req.method === 'POST') {
+          const body = await readJson(req);
+          if (!knownProviders.has(String(body.provider || '').toLowerCase()) || !body.id) {
+            return send(res, 400, { error: 'Invalid provider or title id' });
+          }
+          const idx = library.watchlist.findIndex((e) => e.provider === body.provider && e.id === body.id);
+          let listed = false;
+          if (body.remove === true) {
+            if (idx >= 0) library.watchlist.splice(idx, 1);
+          } else if (idx >= 0 && body.remove === undefined) {
+            library.watchlist.splice(idx, 1);
+          } else if (idx < 0) {
+            library.watchlist.unshift({ ...body, added_at: Math.floor(Date.now() / 1000) });
+            listed = true;
+          } else {
+            listed = true;
+          }
+          library.version += 1;
+          return send(res, 200, { ...library, listed });
+        }
+        if (path === '/api/library/progress' && req.method === 'POST') {
+          const body = await readJson(req);
+          if (!knownProviders.has(String(body.provider || '').toLowerCase()) || !body.id) {
+            return send(res, 400, { error: 'Invalid provider or title id' });
+          }
+          const idx = library.progress.findIndex((e) => e.provider === body.provider && e.id === body.id);
+          if (body.remove) {
+            if (idx >= 0) library.progress.splice(idx, 1);
+          } else {
+            const entry = { ...body, updated_at: Math.floor(Date.now() / 1000) };
+            if (idx >= 0) library.progress[idx] = entry;
+            else library.progress.unshift(entry);
+          }
+          library.version += 1;
+          return send(res, 200, { ...library, stored: !body.remove });
+        }
+        if (path === '/api/library/rating' && req.method === 'POST') {
+          const body = await readJson(req);
+          if (!knownProviders.has(String(body.provider || '').toLowerCase()) || !body.id) {
+            return send(res, 400, { error: 'Invalid provider or title id' });
+          }
+          const idx = library.ratings.findIndex((e) => e.provider === body.provider && e.id === body.id);
+          if (!body.rating || body.rating <= 0) {
+            if (idx >= 0) library.ratings.splice(idx, 1);
+          } else {
+            const entry = { ...body, updated_at: Math.floor(Date.now() / 1000) };
+            if (idx >= 0) library.ratings[idx] = entry;
+            else library.ratings.unshift(entry);
+          }
+          library.version += 1;
+          return send(res, 200, { ...library, rated: body.rating > 0 ? body.rating : null });
+        }
+        if (path === '/api/library/clear' && req.method === 'POST') {
+          const body = await readJson(req);
+          const scope = body.scope || 'all';
+          if (scope === 'watchlist' || scope === 'all') library.watchlist = [];
+          if (scope === 'progress' || scope === 'all') library.progress = [];
+          if (scope === 'ratings' || scope === 'all') library.ratings = [];
+          library.version += 1;
+          return send(res, 200, { ...library, cleared: scope });
+        }
+        return next();
       });
     },
   };
 }
 
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), 'MOVIEBOX_');
-  const ifallhubEnv = loadEnv(mode, process.cwd(), 'IFALLHUB_');
-  const apiTarget =
-    ifallhubEnv.IFALLHUB_API_URL ||
-    process.env.IFALLHUB_API_URL ||
-    env.MOVIEBOX_API_URL ||
-    process.env.MOVIEBOX_API_URL;
+  const env = loadEnv(mode, process.cwd(), '');
+  const apiTarget = env.MOVIEBOX_API_TARGET || 'http://127.0.0.1:8787';
+  const useDemo = mode === 'demo';
+
   return {
-    plugins: [makeMockApiPlugin(!apiTarget)],
+    base: env.VITE_BASE_PATH || '/',
+    plugins: [
+      tailwindcss(),
+      ...(useDemo ? [makeMockApiPlugin()] : []),
+    ],
     server: {
-      host: '0.0.0.0',
+      port: 5173,
+      strictPort: false,
       allowedHosts: true,
-      ...(apiTarget ? { proxy: { '/api': { target: apiTarget, changeOrigin: true } } } : {}),
+      proxy: useDemo
+        ? undefined
+        : {
+            '/api': {
+              target: apiTarget,
+              changeOrigin: true,
+            },
+          },
     },
     preview: {
-      host: '0.0.0.0',
+      port: 4173,
       allowedHosts: true,
+      proxy: {
+        '/api': {
+          target: apiTarget,
+          changeOrigin: true,
+        },
+      },
     },
     build: {
-      chunkSizeWarningLimit: 1000,
+      outDir: 'dist',
+      sourcemap: false,
+      target: 'es2022',
     },
   };
 });
