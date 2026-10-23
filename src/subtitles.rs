@@ -762,7 +762,11 @@ fn decode_zip(bytes: &[u8]) -> Result<String, String> {
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_ascii_lowercase();
+        // zip 9 reports the decoded entry name as a Result.
+        let Ok(entry_name) = entry.name() else {
+            continue;
+        };
+        let name = entry_name.to_ascii_lowercase();
         // Archives often carry a readme next to the caption, so only real
         // subtitle extensions win outright; anything else is a fallback.
         let is_subtitle = [".srt", ".vtt", ".ass", ".ssa", ".sub"]
