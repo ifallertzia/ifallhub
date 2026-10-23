@@ -40,6 +40,8 @@ pub trait Provider: Send + Sync {
 
 New providers implement `Provider` (and optionally `ReleaseProvider` for multi-mirror streams), then register in `src/service.rs`. Responses are automatically cached as MessagePack envelopes.
 
-### MovieBox CDN Manifest Resolution
+### MovieBox CDN Manifest & Failover Resolution
 
 MovieBox CDN stream entries parse signed `CloudFront-Policy` and `Edge-Cache-Cookie` tokens to find stream roots. The manifest resolver accepts only `/dash/` resources. Unhosted legacy `/hls/` cookie targets are dropped to prevent 404 failures during playback or downloads.
+
+When upstream APIs return placeholder deprecation notices, MovieBox-TUI automatically queries the `/resource-position/v2` failover endpoint with scoped episode resolution to recover genuine signed MP4 streams, omitting the DASH Referer to prevent CDN HTTP 429 throttling. Recovered files are matched on `resourceId` plus season/episode, and their real byte size replaces the placeholder's.
