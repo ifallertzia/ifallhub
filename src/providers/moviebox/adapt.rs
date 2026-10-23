@@ -1360,7 +1360,10 @@ mod tests {
         // stream that only carries one must not be advertised as playable.
         let mut hls_targets = 0;
         for release in &releases {
-            if release.direct_url().is_some_and(|url| url.contains("/hls/")) {
+            if release
+                .direct_url()
+                .is_some_and(|url| url.contains("/hls/"))
+            {
                 hls_targets += 1;
             }
         }
