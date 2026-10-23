@@ -11,7 +11,10 @@
  *   PORT                       Public port (required on Render; default 3000).
  *   HOST                       Public bind address (default 0.0.0.0).
  *   MOVIEBOX_WEB_ROOT          Static root (default ../web/dist next to this file).
- *   MOVIEBOX_API_TARGET        Upstream API base URL (default http://127.0.0.1:8787).
+ *   MOVIEBOX_API_TARGET        Upstream API base URL (overrides everything else).
+ *   API_URL                    Upstream API base URL injected by a platform
+ *                              service binding (Vercel services). Used when
+ *                              MOVIEBOX_API_TARGET is not set.
  *   MOVIEBOX_API_BIN           If set (and MOVIEBOX_API_TARGET is not), spawn
  *                              `$MOVIEBOX_API_BIN --web-api $MOVIEBOX_API_ADDR`.
  *   MOVIEBOX_API_ADDR          Listen address for the spawned API (default 127.0.0.1:8787).
@@ -31,11 +34,24 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// A service binding (Vercel services: `{ "type": "service", ... "env": "API_URL" }`)
+// injects the API service's internal base URL as API_URL. The explicit
+// MOVIEBOX_API_TARGET always wins so operators can override it per deployment.
+const boundApiTarget = (process.env.MOVIEBOX_API_TARGET || process.env.API_URL || '').trim();
+const apiTargetSource = process.env.MOVIEBOX_API_TARGET
+  ? 'MOVIEBOX_API_TARGET'
+  : process.env.API_URL
+    ? 'API_URL (service binding)'
+    : 'default loopback';
+
 const config = {
   host: process.env.HOST || '0.0.0.0',
   port: Number.parseInt(process.env.PORT || '3000', 10),
   webRoot: path.resolve(process.env.MOVIEBOX_WEB_ROOT || path.join(__dirname, '..', 'web', 'dist')),
-  apiTarget: process.env.MOVIEBOX_API_TARGET || 'http://127.0.0.1:8787',
+  // Bindings and operators sometimes hand over a trailing slash; URL parsing
+  // tolerates it, but the proxied paths must not end up with `//api`.
+  apiTarget: boundApiTarget ? boundApiTarget.replace(/\/+$/, '') : 'http://127.0.0.1:8787',
+  apiTargetSource,
   apiBin: process.env.MOVIEBOX_API_BIN || '',
   apiAddr: process.env.MOVIEBOX_API_ADDR || '127.0.0.1:8787',
   rateLimit: parseRate(process.env.MOVIEBOX_WEB_RATE_LIMIT, 300),
@@ -49,6 +65,11 @@ function parseRate(raw, fallback) {
 }
 
 const apiOrigin = new URL(config.apiTarget);
+const apiPort = apiOrigin.port
+  ? Number.parseInt(apiOrigin.port, 10)
+  : apiOrigin.protocol === 'https:'
+    ? 443
+    : 80;
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -267,7 +288,7 @@ function proxyApi(req, res, retryCount = 0) {
     {
       protocol: apiOrigin.protocol,
       hostname: apiOrigin.hostname,
-      port: apiOrigin.port || 80,
+      port: apiPort,
       method: req.method,
       path: req.url,
       headers: upstreamHeaders,
@@ -409,12 +430,14 @@ if (!fs.existsSync(path.join(config.webRoot, 'index.html'))) {
   process.exit(1);
 }
 
-if (!process.env.MOVIEBOX_API_TARGET && config.apiBin) {
+if (boundApiTarget) {
+  log(`proxying /api to ${config.apiTarget} from ${apiTargetSource} (not spawning the Rust API)`);
+} else if (config.apiBin) {
   spawnApi();
-} else if (process.env.MOVIEBOX_API_TARGET) {
-  log(`proxying /api to external target ${config.apiTarget} (not spawning the Rust API)`);
 }
 
 server.listen(config.port, config.host, () => {
-  log(`listening on http://${config.host}:${config.port} (api target ${config.apiTarget})`);
+  log(
+    `listening on http://${config.host}:${config.port} (api target ${config.apiTarget} via ${apiTargetSource})`,
+  );
 });

@@ -41,6 +41,11 @@
   - Scoped Snap package detection to `SNAP_NAME` matching `moviebox-tui` to prevent false positive Snap environment detection when launched inside unrelated host sandboxes.
 
 ### Changed
+- **Vercel services deployment**:
+  - Added a root `vercel.json` describing a two-service project: a public `site` service (Node, serves `web/dist`, SPA fallback, rate limits and the streaming `/api` proxy) and an internal `api` service (Rust engine via `moviebox-tui --web-api`), with one catch-all rewrite to `site`.
+  - Added the `API_URL` service binding on `site`: `deploy/vercel-app.sh` and `deploy/server.mjs` now read the injected URL (after the explicit `MOVIEBOX_API_TARGET` override), normalise a trailing slash, and refuse to start rather than silently proxying to loopback when neither is set.
+  - `--web-api` now resolves its listen address as argument → `MOVIEBOX_WEB_API_ADDR` → `PORT` (`0.0.0.0:$PORT`) → `127.0.0.1:8787`, so a platform that injects `PORT` can reach the engine while local runs stay on loopback (`resolve_listen_addr` in `src/web_api.rs`, unit tested).
+  - Added `deploy/vercel-api.sh`, which keeps engine state on `/tmp`, disables the local player probe on servers, and binds the injected port; added `.vercelignore` to keep uploads small, and documented the setup, limits and alternatives in `docs/vercel-deployment.md`.
 - **Web deployment**: `deploy/server.mjs` now treats `/api/library/events` as a long-lived stream (no retry, no idle timeout, no buffering) so SSE survives the reverse proxy, and the smoke test covers the library, event-stream and discovery-extra routes.
 - **Web player (Sakshi-first rotation)**:
   - Auto-play now tries servers in order: Sakshi, then Ritu, then Siddharth, then the rest, one after another. Each server's links and mirrors are tried before moving on. The source picker still defaults to Siddharth.
