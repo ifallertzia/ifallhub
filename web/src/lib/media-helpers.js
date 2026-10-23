@@ -231,12 +231,22 @@ export function summariseReleases(releases = []) {
   return bits.filter(Boolean).join(' · ');
 }
 
-/* ── Season Tabs (exact port of Sidify-V2 seasonTabs.ts) ────── */
+/* ── Season / Episode & Metadata Helpers (MovieBox-TUI models.rs) ── */
+
+export function seasonNumberOf(season, fallback = 0) {
+  const n = Number(season?.number ?? season?.season_number ?? season?.seasonNumber ?? fallback);
+  return Number.isInteger(n) && n >= 0 ? n : fallback;
+}
+
+export function episodeNumberOf(episode, fallback = 1) {
+  const n = Number(episode?.number ?? episode?.episode_number ?? episode?.episodeNumber ?? fallback);
+  return Number.isInteger(n) && n >= 1 ? n : fallback;
+}
 
 export function orderedSeasonNumbers(seasons = []) {
   const seen = new Set();
   for (const s of seasons || []) {
-    const n = Number(s.season_number ?? s.seasonNumber ?? 0);
+    const n = seasonNumberOf(s, 0);
     if (Number.isInteger(n) && n >= 1) seen.add(n);
   }
   return [...seen].sort((a, b) => a - b);
@@ -249,91 +259,30 @@ export function initialSeasonNumber(seasons = [], requested = null) {
   return ordered[0] ?? 1;
 }
 
-/* ── External VLC / Player Launch (Sidify-V2 externalLaunch.ts) */
-
-export function detectClientPlatform() {
-  if (typeof navigator === 'undefined') return 'other';
-  const ua = navigator.userAgent || '';
-  if (/android/i.test(ua)) return 'android';
-  if (/iPad|iPhone|iPod/.test(ua)) return 'ios';
-  if (/Macintosh/.test(ua) && (navigator.maxTouchPoints ?? 0) > 1) return 'ios';
-  if (/Macintosh|Mac OS X/.test(ua)) return 'mac';
-  if (/Windows/.test(ua)) return 'windows';
-  if (/Linux/.test(ua)) return 'linux';
-  return 'other';
+export function officialRatingOf(item, metaEntry = null) {
+  return normaliseRating(
+    item?.imdb_rating ?? metaEntry?.rating ?? metaEntry?.imdb_rating ?? item?.rating,
+  );
 }
 
-export function buildAndroidVlcIntent(streamUrl, title = '') {
-  const schemeMatch = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/i.exec(streamUrl);
-  if (!schemeMatch) return streamUrl;
-  const [, scheme, rest] = schemeMatch;
-  const extras = [`scheme=${scheme.toLowerCase()}`, 'package=org.videolan.vlc', 'type=video/*'];
-  if (title) extras.push(`S.title=${encodeURIComponent(title)}`);
-  return `intent://${rest}#Intent;${extras.join(';')};end`;
-}
-
-export function buildIosVlcUrl(streamUrl) {
-  return `vlc-x-callback://x-callback-url/stream?url=${encodeURIComponent(streamUrl)}`;
-}
-
-export function buildIinaUrl(streamUrl) {
-  return `iina://weblink?url=${encodeURIComponent(streamUrl)}`;
-}
-
-export function externalPlayerLinks(streamUrl, title = '', platform = detectClientPlatform()) {
-  if (!streamUrl) return [];
-  if (platform === 'android') {
-    return [
-      { id: 'vlc', name: 'VLC for Android', href: buildAndroidVlcIntent(streamUrl, title), kind: 'intent' },
-      {
-        id: 'mx',
-        name: 'MX Player',
-        href: streamUrl.replace(/^https?:\/\//i, (m) => `intent://`) + `#Intent;scheme=${streamUrl.startsWith('https') ? 'https' : 'http'};package=com.mxtech.videoplayer.ad;type=video/*;end`,
-        kind: 'intent',
-      },
-    ];
+export function splitCsvList(value) {
+  if (Array.isArray(value)) {
+    return value.map((v) => String(v ?? '').trim()).filter(Boolean);
   }
-  if (platform === 'ios') {
-    return [
-      { id: 'vlc', name: 'VLC for iPhone / iPad', href: buildIosVlcUrl(streamUrl), kind: 'scheme' },
-      { id: 'infuse', name: 'Infuse', href: `infuse://x-callback-url/play?url=${encodeURIComponent(streamUrl)}`, kind: 'scheme' },
-    ];
+  if (typeof value === 'string') {
+    return value
+      .split(/[,|/]/)
+      .map((v) => v.trim())
+      .filter(Boolean);
   }
-  if (platform === 'mac') {
-    return [
-      { id: 'iina', name: 'IINA (macOS)', href: buildIinaUrl(streamUrl), kind: 'scheme' },
-      { id: 'vlc', name: 'VLC (.m3u playlist)', href: '', kind: 'm3u' },
-    ];
-  }
-  return [
-    { id: 'vlc', name: 'VLC (.m3u playlist)', href: '', kind: 'm3u' },
-    { id: 'vlc-scheme', name: 'VLC (vlc:// protocol)', href: `vlc://${streamUrl}`, kind: 'scheme' },
-  ];
+  return [];
 }
 
-export function playInVlcViaM3u(streamUrl, title = 'Ifallhub Stream') {
-  if (!streamUrl || typeof document === 'undefined') return;
-  const safeTitle = String(title || 'Stream').replace(/[\r\n]+/g, ' ').trim();
-  const body = `#EXTM3U\n#EXTINF:-1,${safeTitle}\n${streamUrl}\n`;
-  const blob = new Blob([body], { type: 'audio/x-mpegurl;charset=utf-8' });
-  const blobUrl = URL.createObjectURL(blob);
-  const safeBase = safeTitle.replace(/[^a-z0-9._ -]+/gi, '').trim().slice(0, 80) || 'stream';
-  const a = document.createElement('a');
-  a.href = blobUrl;
-  a.download = `${safeBase}.m3u`;
-  a.rel = 'noopener';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(blobUrl), 30_000);
-}
-
-export function safeDownloadFilename(title, year, quality, filename = '') {
-  const extMatch = /\.(mp4|mkv|webm|avi|mov)\b/i.exec(filename || '');
-  const ext = extMatch ? `.${extMatch[1].toLowerCase()}` : '.mp4';
-  const parts = [title, year ? `(${year})` : '', quality || ''].filter(Boolean).join(' ');
-  const clean = parts.replace(/[^a-z0-9._ ()-]+/gi, '').trim().replace(/\s+/g, ' ').slice(0, 100) || 'movie';
-  return `${clean}${ext}`;
+export function formatDetailList(value) {
+  if (Array.isArray(value)) {
+    return value.map((v) => String(v ?? '').trim()).filter(Boolean).join(', ');
+  }
+  return String(value ?? '').trim();
 }
 
 /* ── Browse Filtering, Facets & Sorting (Sidify-V2 query.ts) ── */
@@ -407,7 +356,14 @@ export function filterAndSortMedia(
 
   const filtered = items.filter((item) => {
     const meta = metaLookup(item);
-    const merged = meta ? { ...meta, ...item, genres: item.genres || meta.genres, imdb_rating: item.imdb_rating ?? meta.imdb_rating } : item;
+    const merged = meta
+      ? {
+          ...meta,
+          ...item,
+          genres: item.genres || meta.genres,
+          imdb_rating: item.imdb_rating ?? meta.rating ?? meta.imdb_rating,
+        }
+      : item;
     if (kind === 'movie' && isSeriesItem(merged)) return false;
     if (kind === 'series' && !isSeriesItem(merged)) return false;
 
@@ -416,7 +372,7 @@ export function filterAndSortMedia(
         itemTitle(merged),
         itemYear(merged),
         merged.director || '',
-        ...(Array.isArray(merged.cast) ? merged.cast : []),
+        ...splitCsvList(merged.stars ?? merged.cast),
         ...itemGenres(merged, meta),
       ]
         .join(' ')
@@ -443,7 +399,7 @@ export function filterAndSortMedia(
   });
 
   const sorted = [...filtered];
-  const scoreOf = (it) => normaliseRating(metaLookup(it)?.imdb_rating ?? it?.imdb_rating) ?? -1;
+  const scoreOf = (it) => officialRatingOf(it, metaLookup(it)) ?? -1;
   const yearOf = (it) => parseYear(metaLookup(it)?.year ?? itemYear(it)) ?? 0;
   const trendOf = (it) => Number(metrics?.[itemId(it)]?.trending ?? 0);
 

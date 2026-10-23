@@ -1,24 +1,37 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   detailPathFor,
-  externalPlayerLinks,
+  episodeNumberOf,
   extractMediaFacets,
   filterAndSortMedia,
+  formatDetailList,
   initialSeasonNumber,
   mediaArt,
+  officialRatingOf,
   orderedSeasonNumbers,
   parseReleaseHints,
-  safeDownloadFilename,
+  seasonNumberOf,
+  splitCsvList,
   summariseReleases,
 } from '../src/lib/media-helpers.js';
-import { ROUTES, parseRoute } from '../src/lib/router.js';
+import { ROUTES, parseRoute, watchPath } from '../src/lib/router.js';
 import {
   chipsHtml,
   posterCardHtml,
   shelfHtml,
 } from '../src/ui/components.js';
+
+const STYLE_CSS = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+
+test('style.css uses @theme inline, @layer base, and never overrides button/link colors outside layers', () => {
+  assert.ok(STYLE_CSS.includes('@theme inline'));
+  assert.ok(STYLE_CSS.includes('@layer base'));
+  assert.ok(STYLE_CSS.includes('.pill-selected'));
+  assert.ok(!/color:\s*inherit/.test(STYLE_CSS));
+});
 
 test('mediaArt builds deterministic SVG poster and backdrop data URIs', () => {
   const posterA = mediaArt('Dune: Part Two', '2024', 'movie', 'poster');
@@ -47,17 +60,30 @@ test('parseReleaseHints extracts container, codec, HDR, bit-depth and Dolby/DTS 
   assert.equal(web.browserAudioRisk, false);
 });
 
-test('orderedSeasonNumbers deduplicates and sorts positive seasons only', () => {
+test('MovieBox-TUI Season/Episode helpers read Rust `number` field and deduplicate cleanly', () => {
   const seasons = [
-    { season_number: 3 },
-    { season_number: 0 },
-    { season_number: 1 },
-    { season_number: 2 },
-    { season_number: 1 },
+    { number: 3, episodes: [{ season: 3, number: 1 }] },
+    { number: 0, episodes: [] },
+    { number: 1, episodes: [{ season: 1, number: 1 }, { season: 1, number: 2 }] },
+    { number: 2, episodes: [{ season: 2, number: 4 }] },
+    { number: 1, episodes: [] },
   ];
+  assert.equal(seasonNumberOf(seasons[0]), 3);
+  assert.equal(episodeNumberOf(seasons[3].episodes[0]), 4);
   assert.deepEqual(orderedSeasonNumbers(seasons), [1, 2, 3]);
   assert.equal(initialSeasonNumber(seasons, '2'), 2);
   assert.equal(initialSeasonNumber(seasons, '99'), 1);
+});
+
+test('officialRatingOf, splitCsvList, and formatDetailList match Rust MediaDetails & TitleMeta schemas', () => {
+  assert.equal(officialRatingOf({ title: 'X' }, { rating: 8.6 }), 8.6);
+  assert.equal(officialRatingOf({ imdb_rating: '8.9' }, { rating: 7.5 }), 8.9);
+  assert.deepEqual(splitCsvList('Timothée Chalamet, Zendaya, Rebecca Ferguson'), [
+    'Timothée Chalamet',
+    'Zendaya',
+    'Rebecca Ferguson',
+  ]);
+  assert.equal(formatDetailList('2160p · 1080p'), '2160p · 1080p');
 });
 
 test('filterAndSortMedia filters by kind, genre, decade/year and sorts cleanly', () => {
@@ -75,7 +101,6 @@ test('filterAndSortMedia filters by kind, genre, decade/year and sorts cleanly',
       title: 'Interstellar',
       year: '2014',
       media_type: 'movie',
-      imdb_rating: '8.7',
       genres: ['Science Fiction', 'Drama'],
     },
     {
@@ -88,7 +113,8 @@ test('filterAndSortMedia filters by kind, genre, decade/year and sorts cleanly',
     },
   ];
 
-  const moviesOnly = filterAndSortMedia(catalog, { kind: 'movie', sort: 'rating' });
+  const metaLookup = (it) => (it.id.value === 'm2' ? { rating: 8.7 } : null);
+  const moviesOnly = filterAndSortMedia(catalog, { kind: 'movie', sort: 'rating', metaLookup });
   assert.deepEqual(moviesOnly.map((i) => i.id.value), ['m2', 'm1']);
 
   const decade2020s = filterAndSortMedia(catalog, { kind: 'movie', year: '2020s' });
@@ -102,22 +128,10 @@ test('filterAndSortMedia filters by kind, genre, decade/year and sorts cleanly',
   assert.deepEqual(facets.years, ['2024', '2022', '2014']);
 });
 
-test('externalPlayerLinks builds platform-appropriate VLC/IINA schemes', () => {
-  const url = 'https://ifallhub.test/api/media/token/video.mkv';
-  const android = externalPlayerLinks(url, 'Dune', 'android');
-  assert.match(android[0].href, /^intent:\/\/ifallhub\.test\/api\/media\/token\/video\.mkv#Intent;scheme=https;package=org\.videolan\.vlc/);
-
-  const ios = externalPlayerLinks(url, 'Dune', 'ios');
-  assert.match(ios[0].href, /^vlc-x-callback:\/\/x-callback-url\/stream\?url=/);
-
-  const mac = externalPlayerLinks(url, 'Dune', 'mac');
-  assert.match(mac[0].href, /^iina:\/\/weblink\?url=/);
-});
-
-test('detailPathFor, safeDownloadFilename and summariseReleases format cleanly', () => {
+test('detailPathFor, watchPath, and summariseReleases format cleanly', () => {
   assert.equal(detailPathFor('moviebox', 'abc-1', false), '/movies/moviebox/abc-1');
   assert.equal(detailPathFor('dramachi', 'show/2', true), '/series/dramachi/show%2F2');
-  assert.equal(safeDownloadFilename('Dune: Part Two', '2024', '1080p', 'Dune.mkv'), 'Dune Part Two (2024) 1080p.mkv');
+  assert.equal(watchPath('moviebox', 'abc-1', { season: 2, episode: 5 }), '/watch/moviebox/abc-1?s=2&e=5');
   assert.equal(
     summariseReleases([
       { quality: '2160p', size_bytes: 5_000_000_000 },
@@ -127,21 +141,23 @@ test('detailPathFor, safeDownloadFilename and summariseReleases format cleanly',
   );
 });
 
-test('Sidify-V2 PosterCard, Shelf and Chips render escaped semantic markup', () => {
+test('PosterCard, Shelf and Chips use .pill-selected instead of stark white blocks', () => {
   const html = posterCardHtml(
     {
       id: { provider: 'moviebox', value: 'x1' },
       title: 'Dune <script>',
       year: '2024',
       media_type: 'movie',
-      imdb_rating: '8.5',
     },
-    { listed: true },
+    { listed: true, metaEntry: { rating: 8.5, genres: ['Sci-Fi'] } },
   );
   assert.ok(html.includes('href="/movies/moviebox/x1"'));
   assert.ok(html.includes('Dune &lt;script&gt;'));
+  assert.ok(html.includes('8.5'));
   assert.ok(!html.includes('<script>'));
   assert.ok(html.includes('data-watchlist="1"'));
+  assert.ok(html.includes('pill-selected'));
+  assert.ok(!html.includes('bg-primary text-on-primary'));
 
   const shelf = shelfHtml({ key: 'trending', title: 'Trending now', itemsHtml: html });
   assert.ok(shelf.includes('Trending now'));
@@ -150,9 +166,11 @@ test('Sidify-V2 PosterCard, Shelf and Chips render escaped semantic markup', () 
 
   const chips = chipsHtml([{ id: 'all', label: 'All' }, { id: 'Action', label: 'Action' }], 'Action');
   assert.ok(chips.includes('aria-selected="true"'));
+  assert.ok(chips.includes('pill-selected'));
+  assert.ok(!chips.includes('bg-primary text-on-primary'));
 });
 
-test('parseRoute handles Sidify-V2 movie/series/watchlist/history paths alongside legacy paths', () => {
+test('parseRoute handles movie/series/watchlist/history/watch paths alongside legacy paths', () => {
   assert.ok(Array.isArray(ROUTES) && ROUTES.length >= 10);
   assert.equal(parseRoute('/movies').name, 'movies');
   assert.equal(parseRoute('/series').name, 'series');
@@ -161,6 +179,13 @@ test('parseRoute handles Sidify-V2 movie/series/watchlist/history paths alongsid
   assert.equal(parseRoute('/history').name, 'tracker');
   assert.equal(parseRoute('/tracker').name, 'tracker');
   assert.equal(parseRoute({ pathname: '/genre/Action', search: '' }).params.genre, 'Action');
+
+  const watch = parseRoute('/watch/moviebox/101?s=1&e=3');
+  assert.equal(watch.name, 'watch');
+  assert.equal(watch.params.provider, 'moviebox');
+  assert.equal(watch.params.id, '101');
+  assert.equal(watch.query.get('s'), '1');
+  assert.equal(watch.query.get('e'), '3');
 
   const movieDetail = parseRoute('/movies/moviebox/101');
   assert.equal(movieDetail.name, 'details');

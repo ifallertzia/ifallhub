@@ -86,7 +86,7 @@ export async function renderTracker(container, ctx = {}) {
                   icon: 'clock',
                   title: 'Nothing in progress',
                   message: 'Movies and episodes you start watching will appear here with automatic resume points.',
-                  action: `<a href="/movies" data-nav class="inline-flex h-10 items-center rounded-full bg-primary px-5 text-[14px] font-semibold text-on-primary">Explore movies</a>`,
+                  action: `<a href="/movies" data-nav class="pill-selected inline-flex h-10 items-center rounded-full px-5 text-[14px] font-semibold">Explore movies</a>`,
                 })
           }
         </section>

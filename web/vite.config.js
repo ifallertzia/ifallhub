@@ -279,12 +279,11 @@ function makeMockApiPlugin() {
           const seasonTotal = found.season_count || 2;
           const seasons = found.media_type === 'series'
             ? Array.from({ length: seasonTotal }, (_, sIdx) => ({
-                season_number: sIdx + 1,
-                episode_count: 8,
+                number: sIdx + 1,
                 episodes: Array.from({ length: 8 }, (__, eIdx) => ({
-                  episode_number: eIdx + 1,
+                  season: sIdx + 1,
+                  number: eIdx + 1,
                   title: `Chapter ${eIdx + 1}`,
-                  duration: found.duration || '48m',
                   overview: `Season ${sIdx + 1}, Episode ${eIdx + 1} of ${found.title}.`,
                 })),
               }))
@@ -292,8 +291,13 @@ function makeMockApiPlugin() {
           return send(res, 200, {
             ...found,
             id: { provider, value: found.id.value },
-            prints: ['2160p', '1080p', '720p'],
-            audios: ['English', 'Hindi'],
+            stars: Array.isArray(found.cast) ? found.cast.join(', ') : '',
+            prints: '2160p · 1080p · 720p',
+            audios: 'English, Hindi',
+            dubs: [
+              { subject_id: found.id.value, language: 'en', label: 'Original (English)' },
+              { subject_id: found.id.value, language: 'hi', label: 'Hindi Dub' },
+            ],
             seasons,
           });
         }
@@ -315,12 +319,9 @@ function makeMockApiPlugin() {
             const it = sampleCatalog.find((entry) => entry.id.value === id);
             if (it) {
               meta[id] = {
-                imdb_rating: it.imdb_rating,
+                rating: Number(it.imdb_rating) || null,
                 genres: it.genres,
                 duration: it.duration,
-                year: it.year,
-                poster_url: it.poster_url,
-                media_type: it.media_type,
               };
             }
           }
@@ -489,6 +490,7 @@ export default defineConfig(({ mode }) => {
       ...(useDemo ? [makeMockApiPlugin()] : []),
     ],
     server: {
+      host: '0.0.0.0',
       port: 5173,
       strictPort: false,
       allowedHosts: true,
