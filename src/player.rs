@@ -714,7 +714,6 @@ fn vlc_command(
             .arg(format!("--width={width}"))
             .arg(format!("--height={height}"));
     }
-    command.arg("--play-and-exit");
     #[cfg(not(target_os = "macos"))]
     command.arg("--no-one-instance");
     command.arg("--network-caching=3000");
@@ -1616,7 +1615,11 @@ mod tests {
 
         assert!(args.contains(&"--width=1280".into()));
         assert!(args.contains(&"--height=720".into()));
-        assert!(args.contains(&"--play-and-exit".into()));
+        assert!(!args.contains(&"--play-and-exit".into()));
+        assert!(args.contains(&"--network-caching=3000".into()));
+        assert!(args.contains(&"--file-caching=3000".into()));
+        assert!(args.contains(&"--http-reconnect".into()));
+        assert!(args.contains(&"--adaptive-logic=predictive".into()));
         assert!(args.contains(&"--start-time=42".into()));
         assert!(args.contains(&"--http-referrer=https://example.test/".into()));
         assert!(args.contains(&"--http-user-agent=MovieBox-Test".into()));
@@ -2139,5 +2142,189 @@ mod tests {
             .collect();
         assert_eq!(export_args.last().map(String::as_str), Some("io.mpv.Mpv"));
         assert!(export_args.contains(&"--filesystem=xdg-data/moviebox-tui".to_string()));
+    }
+    #[test]
+    fn test_vlc_command_adaptive_maxheight_cap() {
+        let cmd = vlc_command(
+            "https://example.com/video.mpd",
+            None,
+            &[],
+            None,
+            None,
+            Some(1080),
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--adaptive-maxheight=1080".to_string()));
+        assert!(!args.contains(&"--play-and-exit".to_string()));
+    }
+
+    #[test]
+    fn test_vlc_command_omits_adaptive_maxheight_when_none_or_zero() {
+        let cmd_none = vlc_command("https://example.com/video.mpd", None, &[], None, None, None);
+        let args_none: Vec<String> = cmd_none
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !args_none
+                .iter()
+                .any(|a| a.starts_with("--adaptive-maxheight="))
+        );
+        assert!(!args_none.contains(&"--play-and-exit".to_string()));
+
+        let cmd_zero = vlc_command(
+            "https://example.com/video.mpd",
+            None,
+            &[],
+            None,
+            None,
+            Some(0),
+        );
+        let args_zero: Vec<String> = cmd_zero
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !args_zero
+                .iter()
+                .any(|a| a.starts_with("--adaptive-maxheight="))
+        );
+    }
+
+    #[test]
+    fn test_vlc_command_no_one_instance_cross_platform() {
+        let cmd = vlc_command("https://example.com/video.mp4", None, &[], None, None, None);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        #[cfg(target_os = "macos")]
+        assert!(!args.contains(&"--no-one-instance".to_string()));
+        #[cfg(not(target_os = "macos"))]
+        assert!(args.contains(&"--no-one-instance".to_string()));
+        assert!(!args.contains(&"--play-and-exit".to_string()));
+    }
+
+    #[test]
+    fn test_mpv_command_keeps_open_invariants() {
+        let cmd = mpv_command(
+            "https://example.com/video.mkv",
+            None,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            None,
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--idle=no".to_string()));
+        assert!(args.contains(&"--keep-open=no".to_string()));
+        assert!(args.contains(&"--hwdec=auto-safe".to_string()));
+        assert!(args.contains(&"--demuxer-max-bytes=256M".to_string()));
+        assert!(args.contains(&"--stream-buffer-size=4M".to_string()));
+        assert!(!args.contains(&"--play-and-exit".to_string()));
+    }
+
+    #[test]
+    fn test_mpv_command_dash_vs_direct_stream_ytdl_behavior() {
+        let dash_cmd = mpv_command(
+            "https://cdn.example.com/dash/index.mpd",
+            None,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some(720),
+        );
+        let dash_args: Vec<String> = dash_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(dash_args.contains(&"--force-seekable=yes".to_string()));
+        assert!(!dash_args.contains(&"--ytdl=no".to_string()));
+
+        let direct_cmd = mpv_command(
+            "https://cdn.example.com/movie.mkv",
+            None,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            None,
+        );
+        let direct_args: Vec<String> = direct_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(direct_args.contains(&"--ytdl=no".to_string()));
+        assert!(!direct_args.contains(&"--force-seekable=yes".to_string()));
+    }
+
+    #[test]
+    fn test_android_intent_command_action_and_type_invariants() {
+        let url = "https://example.com/stream.m3u8";
+        let am_opener =
+            AndroidOpener::TermuxAm("/data/data/com.termux/files/usr/bin/termux-am".to_string());
+        let am_cmd = android_intent_command_for_opener(&am_opener, url, None, &[]);
+        let am_args: Vec<String> = am_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(am_args.contains(&"start".to_string()));
+        assert!(am_args.contains(&"-a".to_string()));
+        assert!(am_args.contains(&"android.intent.action.VIEW".to_string()));
+        assert!(am_args.contains(&"-t".to_string()));
+        assert!(am_args.contains(&"video/*".to_string()));
+        assert!(am_args.contains(&url.to_string()));
+
+        let open_opener = AndroidOpener::TermuxOpen(
+            "/data/data/com.termux/files/usr/bin/termux-open".to_string(),
+        );
+        let open_cmd = android_intent_command_for_opener(&open_opener, url, None, &[]);
+        let open_args: Vec<String> = open_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(open_args.contains(&"--chooser".to_string()));
+        assert!(open_args.contains(&"--content-type".to_string()));
+        assert!(open_args.contains(&"video/*".to_string()));
+        assert!(open_args.contains(&url.to_string()));
+    }
+
+    #[test]
+    fn test_player_supports_headers_full_cross_platform_matrix() {
+        let empty_headers: Vec<(String, String)> = Vec::new();
+        let standard_headers = vec![
+            ("User-Agent".to_string(), "MovieBox-UA".to_string()),
+            ("Referer".to_string(), "https://example.com/".to_string()),
+        ];
+        let cookie_headers = vec![("Cookie".to_string(), "auth_session=123".to_string())];
+
+        assert!(supports_headers(PlayerKind::Mpv, &empty_headers));
+        assert!(supports_headers(PlayerKind::Mpv, &standard_headers));
+        assert!(supports_headers(PlayerKind::Mpv, &cookie_headers));
+
+        assert!(supports_headers(PlayerKind::Vlc, &empty_headers));
+        assert!(supports_headers(PlayerKind::Vlc, &standard_headers));
+        assert!(supports_headers(PlayerKind::Vlc, &cookie_headers));
+
+        assert!(supports_headers(PlayerKind::AndroidIntent, &empty_headers));
+        assert!(supports_headers(
+            PlayerKind::AndroidIntent,
+            &standard_headers
+        ));
+        assert!(supports_headers(PlayerKind::AndroidIntent, &cookie_headers));
+
+        assert!(supports_headers(PlayerKind::Iina, &empty_headers));
+        assert!(supports_headers(PlayerKind::Iina, &standard_headers));
     }
 }

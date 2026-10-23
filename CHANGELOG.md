@@ -7,11 +7,19 @@
   - Restored the "Playback links" panel on the player page. It had been hidden behind `hidden`/`aria-hidden` during the phone-controls redesign, which is why the resolved links — including the `.h265`/HEVC releases the browser cannot decode — stopped showing up at all. Every link the player is handed is listed again with its provider, quality, mirror and stream type, and H.265/HEVC or `.mkv` entries carry a `⚠` note saying mpv/VLC will play them.
   - Each row shows the full URL in a selectable field with its own "Copy link" button, plus a "Copy all" button for the whole list. Copying falls back to the legacy `execCommand` path (and to selecting the text) when the Clipboard API is unavailable, a copied row confirms with "Copied!", retried links update their row instead of stacking duplicates, and the list keeps the newest 40 links.
   - Added a "⧉ Copy link" action to the player page: it copies the exact URL playback is using right now (or resolves the selected release when nothing is playing yet) and confirms with a paste-into-VLC toast, so an H.265/HEVC or `.mkv` release can be handed to mpv/VLC in one click.
+- **MovieBox returned the placeholder clip instead of the real movie (site-wide outage)**:
+  - Since 2026-10-13 the MovieBox API answers `play-info` and `resource` requests with one short placeholder clip for every title. The client correctly rejected that clip, so every movie and episode ended in "No streams available" — the reason the web player and the TUI both had nothing to play.
+  - Recover the real signed MP4 by asking `resource-position/v2` for the original file whenever a resource only points at the placeholder, and match the recovered file to the requested season/episode before accepting it.
+  - Query `resource/v2` for the exact season/episode instead of paginating the whole series, and fall back to the legacy paged listing only when the scoped query fails.
+  - Send only the MovieBox user agent to the CDN for recovered MP4s; a `Referer` header makes the CDN answer HTTP 429.
+  - Report the recovered file's real size instead of the placeholder's 824 KB, so the stream list, quality picker and download progress are accurate.
+  - Bumped the MovieBox stream cache schema to `v2_` so entries cached against the placeholder clip are dropped on upgrade.
 - **Media Playback & Subtitle Engine**:
+  - Removed `--play-and-exit` from VLC invocations so VLC stays open across adaptive and HLS chunk transitions instead of closing when a stream fails.
   - Reset legacy Android player defaults in graphical X11 and Wayland sessions so native Linux players take precedence over external Android intent dialogs.
   - Prioritized native Linux media player paths over foreign container fallbacks on Linux systems and preserved dynamic auto-player resolution for unconfigured sessions.
 - **Providers & Stream Resolution**:
-  - Filtered out unhosted MovieBox `/hls/` signed cookie targets in manifest resolution, which stops unplayable H.264 stream entries from failing with HTTP 404 during downloads or media playback.
+  - Filtered out unhosted MovieBox `/hls/` signed cookie targets in manifest resolution, which stops unplayable H.264 stream entries from failing with HTTP 404 during downloads or media playback. Manifest resolution now accepts only `/dash/` resources (plus an already-resolved `.mpd`), so the stream list no longer advertises links the CDN stopped hosting.
 - **Download Engine & Batch Queue**:
   - Fixed season batch downloads by arming `is_waiting_for_download_stream` during queue steps, eliminating immediate empty-list download calls that aborted multi-episode queues.
   - Reset the download resolution state lock on 4KHDHub resolver timeouts and errors so failed mirror resolutions do not block subsequent download attempts.
@@ -41,6 +49,7 @@
   - Redesigned the player page with a stage, a control bar showing the server rotation, and a links list.
 - **Web downloads**: every link (and mirror) now has its own Download button in the stream list and on the player page.
 - **Dependencies & Build Infrastructure**:
+  - Upgraded `zip` to 9.0.5, `rustls` to 0.23.46, `quinn-proto` to 0.11.19, `rustls-webpki` to 0.103.16 and `webpki-roots` to 1.0.10, resolving RustSec security advisories.
   - Upgraded `sha2` to 0.11 with chunked streaming hash updates, preserving non-blocking checksum verification for release archives.
   - Upgraded `dirs` to 7.0, `futures` to 0.3.34, and `zip` to 8.6 across platform config paths, async tasks, and updater archive extraction.
 
